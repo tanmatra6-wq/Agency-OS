@@ -44,7 +44,7 @@ async def create_tenant(body: TenantIn, s: AsyncSession = Depends(get_worker_db)
     await s.flush()
     
     from app.middleware import VALID_TENANTS_CACHE
-    VALID_TENANTS_CACHE[t.id] = (True, time.time())
+    VALID_TENANTS_CACHE[t.id] = True
     
     return {"tenant_id": t.id, "brand_id": b.id}
 
@@ -102,7 +102,7 @@ async def update_tenant_status(
     
     # Update the gateway memory cache
     from app.middleware import VALID_TENANTS_CACHE
-    VALID_TENANTS_CACHE[tenant_id] = (body.is_active, time.time())
+    VALID_TENANTS_CACHE[tenant_id] = body.is_active
     
     return tenant
 

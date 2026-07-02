@@ -109,9 +109,9 @@ async def test_tenant_validation_cache_ttl(client: AsyncClient, session):
         original_session_maker = app.state.db_session_maker
         
         # 2. Case A: Check cache access within TTL (e.g. +10 seconds).
-        # We mock time.time to simulate 10 seconds passing.
-        current_time = time.time()
-        with patch("time.time", return_value=current_time + 10):
+        # We mock time.monotonic to simulate 10 seconds passing.
+        current_time = time.monotonic()
+        with patch("time.monotonic", return_value=current_time + 10):
             app.state.db_session_maker = raise_db_error
             try:
                 r = await client.get("/actions/catalog", headers={"X-Tenant-ID": tenant_id})
@@ -121,8 +121,8 @@ async def test_tenant_validation_cache_ttl(client: AsyncClient, session):
                 app.state.db_session_maker = original_session_maker
 
         # 3. Case B: Check cache access past TTL (e.g. +600 seconds).
-        # We mock time.time to simulate 10 minutes passing.
-        with patch("time.time", return_value=current_time + 600):
+        # We mock time.monotonic to simulate 10 minutes passing.
+        with patch("time.monotonic", return_value=current_time + 600):
             app.state.db_session_maker = raise_db_error
             try:
                 r = await client.get("/actions/catalog", headers={"X-Tenant-ID": tenant_id})
