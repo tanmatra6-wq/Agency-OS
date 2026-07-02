@@ -137,15 +137,16 @@ jobs:
         id: secrets
         run: |
           set -euo pipefail
-          # Base platform secrets (always provisioned).
-          SECRETS="DATABASE_URL=${DATABASE_URL_SECRET}:latest,WORKER_DATABASE_URL=aos-worker-database-url:latest,OPERATOR_TOKEN=aos-operator-token:latest,WHATSAPP_APP_SECRET=whatsapp-app-secret:latest,WHATSAPP_VERIFY_TOKEN=whatsapp-verify-token:latest"
+          # Base platform secrets (always provisioned). SECRET_KEY (the OAuth state HMAC
+          # key) is REQUIRED: app/services/oauth.py fails to boot in production without it,
+          # so it is wired unconditionally and the deploy fails if aos-oauth-state-secret
+          # is missing — provision it via ./load_credentials.sh before deploying.
+          SECRETS="DATABASE_URL=${DATABASE_URL_SECRET}:latest,WORKER_DATABASE_URL=aos-worker-database-url:latest,OPERATOR_TOKEN=aos-operator-token:latest,WHATSAPP_APP_SECRET=whatsapp-app-secret:latest,WHATSAPP_VERIFY_TOKEN=whatsapp-verify-token:latest,SECRET_KEY=aos-oauth-state-secret:latest"
           # Optional runtime secrets — OAuth app credentials (read as env vars by
-          # app/services/oauth_registry.py) plus SECRET_KEY (HMAC key signing the OAuth
-          # state in app/services/oauth.py). Each is injected ONLY if the Secret Manager
-          # secret exists, so an unprovisioned one is skipped (insecure/mock fallback)
-          # rather than failing the deploy. Provision via ./load_credentials.sh.
+          # app/services/oauth_registry.py). Each is injected ONLY if the Secret Manager
+          # secret exists, so an unprovisioned one is skipped (mock fallback → that
+          # provider's OAuth is simply non-functional) rather than failing the deploy.
           declare -A OPTIONAL_SECRETS=(
-            [SECRET_KEY]=aos-oauth-state-secret
             [GOOGLE_ADS_CLIENT_ID]=google-ads-client-id
             [GOOGLE_ADS_CLIENT_SECRET]=google-ads-client-secret
             [META_ADS_CLIENT_ID]=meta-ads-client-id

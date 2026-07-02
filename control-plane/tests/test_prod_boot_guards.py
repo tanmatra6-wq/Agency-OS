@@ -40,7 +40,8 @@ def setup_valid_prod_env(monkeypatch):
     for var in [
         "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET",
         "SHOPIFY_CLIENT_ID", "SHOPIFY_CLIENT_SECRET",
-        "WHATSAPP_TOKEN", "WHATSAPP_VERIFY_TOKEN", "WHATSAPP_APP_SECRET", "WHATSAPP_PHONE_NUMBER_ID"
+        "WHATSAPP_TOKEN", "WHATSAPP_VERIFY_TOKEN", "WHATSAPP_APP_SECRET", "WHATSAPP_PHONE_NUMBER_ID",
+        "SECRET_KEY"
     ]:
         monkeypatch.setenv(var, "secure-prod-value-xyz")
 
@@ -55,11 +56,25 @@ def test_prod_boot_guards_operator_token(monkeypatch):
     setup_valid_prod_env(monkeypatch)
     monkeypatch.setenv("OPERATOR_TOKEN", "default-dev-token")
     clean_imports()
-    
+
     with pytest.raises(RuntimeError) as exc_info:
         import app.main
     assert "OPERATOR_TOKEN" in str(exc_info.value)
 
+
+
+def test_prod_boot_guards_secret_key(monkeypatch):
+    # ENV=production + SECRET_KEY left at the built-in default -> RuntimeError
+    monkeypatch.setenv("ENV", "production")
+    monkeypatch.setenv("OPERATOR_TOKEN", "super-secret-token")
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://postgres:postgres@10.0.0.1:5432/agency_os")
+    monkeypatch.setenv("WHATSAPP_APP_SECRET", "mock-whatsapp-secret")
+    monkeypatch.delenv("SECRET_KEY", raising=False)
+    clean_imports()
+
+    with pytest.raises(RuntimeError) as exc_info:
+        import app.services.oauth
+    assert "SECRET_KEY must be set" in str(exc_info.value)
 
 def test_prod_boot_guards_database_url(monkeypatch):
     # Case 2: ENV=production + DATABASE_URL contains localhost -> RuntimeError
@@ -87,7 +102,7 @@ def test_prod_boot_guards_valid_prod(monkeypatch):
     # Case 3: ENV=production + valid baseline -> boots fine
     setup_valid_prod_env(monkeypatch)
     clean_imports()
-    
+
     try:
         import app.database
         import app.main

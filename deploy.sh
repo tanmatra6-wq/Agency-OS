@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
-# Deploy control-plane backend to Cloud Run with CORS configuration
+# Deploy control-plane backend to Cloud Run with CORS configuration.
+#
+# DEPRECATED: the source of truth for deploys is the GitHub Actions CD
+# (.github/workflows/deploy.yml), which runs migrations, a canary + smoke test,
+# and the traffic shift. This manual script is kept for break-glass use only and
+# is aligned to the same region/instance as the CD (us-central1 / aos-db-us).
+# See CUTOVER.md before running it by hand.
 set -euo pipefail
 
 GCP_PROJECT_ID="aos-control-plane-tmg"
-REGION="asia-south1"
+REGION="us-central1"
 BACKEND_SERVICE="agency-os-backend"
 FRONTEND_SERVICE="agency-os-web"
 WORKER_SA="aos-worker@$GCP_PROJECT_ID.iam.gserviceaccount.com"
@@ -59,7 +65,7 @@ fi
 echo "Resolving Backend Service URL..."
 APP_URL=$(gcloud run services describe "$BACKEND_SERVICE" --platform managed --region "$REGION" --format="value(status.url)" --project "$GCP_PROJECT_ID" 2>/dev/null || true)
 if [ -z "$APP_URL" ] || [ "$APP_URL" = "null" ]; then
-    APP_URL="https://agency-os-backend-730671240713.asia-south1.run.app"
+    APP_URL="https://agency-os-backend-730671240713.us-central1.run.app"
 fi
 echo "Backend Service URL: $APP_URL"
 
@@ -68,8 +74,8 @@ echo "Updating Cloud Run service $BACKEND_SERVICE..."
 gcloud run services update "$BACKEND_SERVICE" \
   --image "$REGION-docker.pkg.dev/$GCP_PROJECT_ID/aos-docker/control-plane:latest" \
   --set-env-vars="^###^ALLOWED_ORIGINS=$ALLOWED_ORIGINS###ENV=production###GCP_PROJECT=$GCP_PROJECT_ID###GCP_LOCATION=$REGION###AOS_STATE_BUCKET=aos-tfstate-tmg###OUTBOX_QUEUE_NAME=aos-outbox###APP_URL=$APP_URL###AOS_WORKER_SERVICE_ACCOUNT=$WORKER_SA" \
-  --set-secrets="DATABASE_URL=aos-database-url:latest,WORKER_DATABASE_URL=aos-worker-database-url:latest,OPERATOR_TOKEN=aos-operator-token:latest,WHATSAPP_APP_SECRET=whatsapp-app-secret:latest,WHATSAPP_VERIFY_TOKEN=whatsapp-verify-token:latest" \
-  --add-cloudsql-instances="aos-control-plane-tmg:asia-south1:aos-db" \
+  --set-secrets="DATABASE_URL=aos-database-url:latest,WORKER_DATABASE_URL=aos-worker-database-url:latest,OPERATOR_TOKEN=aos-operator-token:latest,WHATSAPP_APP_SECRET=whatsapp-app-secret:latest,WHATSAPP_VERIFY_TOKEN=whatsapp-verify-token:latest,SECRET_KEY=aos-oauth-state-secret:latest" \
+  --add-cloudsql-instances="aos-control-plane-tmg:us-central1:aos-db-us" \
   --memory 2Gi \
   --region "$REGION" \
   --project "$GCP_PROJECT_ID"

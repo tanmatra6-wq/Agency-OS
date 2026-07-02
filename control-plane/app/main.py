@@ -43,8 +43,10 @@ if SENTRY_DSN:
             SqlalchemyIntegration(),
             HttpxIntegration(),
         ],
-        traces_sample_rate=1.0,
-        profiles_sample_rate=1.0,
+        # Default to light sampling in production; override via env. 100% tracing +
+        # profiling is prohibitively expensive and noisy at real request volumes.
+        traces_sample_rate=float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0.1")),
+        profiles_sample_rate=float(os.getenv("SENTRY_PROFILES_SAMPLE_RATE", "0.1")),
     )
 
 # Setup logging

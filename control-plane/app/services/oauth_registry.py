@@ -57,10 +57,16 @@ class OauthProviderRegistry:
             if not custom_domain.startswith("https://"):
                 custom_domain = f"https://{custom_domain}"
             base_auth_url = f"{custom_domain.rstrip('/')}{cfg['auth_url']}"
-            
+        elif not base_auth_url.startswith("http"):
+            # Providers like Salesforce use a per-tenant instance host; a relative
+            # auth_url without custom_domain would produce a broken same-host redirect.
+            raise ValueError(
+                f"OAuth provider '{provider}' requires an instance domain (custom_domain) but none was supplied."
+            )
+
         env_prefix = provider.replace("-", "_").upper()
         client_id = os.getenv(f"{env_prefix}_CLIENT_ID", f"mock-{provider}-client-id")
-        
+
         params = {
             "client_id": client_id,
             "redirect_uri": redirect_uri,
@@ -86,7 +92,11 @@ class OauthProviderRegistry:
             if not custom_domain.startswith("https://"):
                 custom_domain = f"https://{custom_domain}"
             base_token_url = f"{custom_domain.rstrip('/')}{cfg['token_url']}"
-            
+        elif not base_token_url.startswith("http"):
+            raise ValueError(
+                f"OAuth provider '{provider}' requires an instance domain (custom_domain) but none was supplied."
+            )
+
         env_prefix = provider.replace("-", "_").upper()
         client_id = os.getenv(f"{env_prefix}_CLIENT_ID", f"mock-{provider}-client-id")
         client_secret = os.getenv(f"{env_prefix}_CLIENT_SECRET", f"mock-{provider}-client-secret")

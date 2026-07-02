@@ -3,6 +3,8 @@ from app.observability import trace_context
 from fastapi import Request, status
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
+import os
+import time
 import uuid
 import time
 
@@ -41,9 +43,48 @@ class TraceMiddleware(BaseHTTPMiddleware):
 
 
 
-# Thread-safe memory cache mapping tenant_id -> (is_active: bool, cached_at: float) to ensure zero-latency fast-paths
-VALID_TENANTS_CACHE: dict[str, tuple[bool, float]] = {}
-TENANT_CACHE_TTL_SECONDS = 300
+class _TTLTenantCache:
+  """Dict-like cache of tenant_id -> is_active with a per-entry TTL.
+
+  The old plain-dict cache never expired, so a tenant suspended/deleted on one
+  Cloud Run instance stayed cached as active in every OTHER instance's memory
+  until that instance restarted. Bounding each entry with a TTL forces every
+  instance to re-validate against the DB within TENANT_CACHE_TTL_SECONDS, while
+  preserving the zero-latency fast path within the window. Drop-in for the dict
+  API the call sites already use (item get/set, `in`, pop, clear).
+  """
+
+  def __init__(self, ttl_seconds: float):
+    self._ttl = ttl_seconds
+    self._d: dict[str, tuple[bool, float]] = {}
+
+  def __setitem__(self, key: str, value: bool) -> None:
+    self._d[key] = (value, time.monotonic())
+
+  def __contains__(self, key: str) -> bool:
+    entry = self._d.get(key)
+    if entry is None:
+      return False
+    if time.monotonic() - entry[1] > self._ttl:
+      self._d.pop(key, None)  # lazily evict on read
+      return False
+    return True
+
+  def __getitem__(self, key: str) -> bool:
+    return self._d[key][0]
+
+  def pop(self, key: str, default=None):
+    entry = self._d.pop(key, None)
+    return default if entry is None else entry[0]
+
+  def clear(self) -> None:
+    self._d.clear()
+
+
+# Memory cache mapping tenant_id -> is_active (bool) for a zero-latency fast-path,
+# bounded by TTL so suspensions/deletions propagate across instances.
+TENANT_CACHE_TTL_SECONDS = float(os.getenv("TENANT_CACHE_TTL_SECONDS", "60"))
+VALID_TENANTS_CACHE = _TTLTenantCache(TENANT_CACHE_TTL_SECONDS)
 
 
 class TenantIsolationMiddleware(BaseHTTPMiddleware):
@@ -71,18 +112,13 @@ class TenantIsolationMiddleware(BaseHTTPMiddleware):
     # --- SECURE TENANT VALIDATION ---
     bypass_validation = getattr(request.app.state, "bypass_tenant_validation", False)
     if not bypass_validation:
-      use_cached = False
       if tenant_id in VALID_TENANTS_CACHE:
-        is_active, cached_at = VALID_TENANTS_CACHE[tenant_id]
-        if time.time() - cached_at < TENANT_CACHE_TTL_SECONDS:
-          use_cached = True
-          if not is_active:
-            return JSONResponse(
-                status_code=status.HTTP_403_FORBIDDEN,
-                content={"detail": "Forbidden: Tenant account is suspended."},
-            )
-
-      if not use_cached:
+        if not VALID_TENANTS_CACHE[tenant_id]:
+          return JSONResponse(
+              status_code=status.HTTP_403_FORBIDDEN,
+              content={"detail": "Forbidden: Tenant account is suspended."},
+          )
+      else:
         # 2. Slow path: check database
         try:
           session_maker = getattr(request.app.state, "db_session_maker", AsyncSessionLocal)
@@ -106,8 +142,8 @@ class TenantIsolationMiddleware(BaseHTTPMiddleware):
             
             db_tenant_id, is_active = row
             
-            # Cache the verified tenant status with current timestamp
-            VALID_TENANTS_CACHE[tenant_id] = (is_active, time.time())
+            # Cache the verified tenant status
+            VALID_TENANTS_CACHE[tenant_id] = is_active
             
             if not is_active:
               return JSONResponse(

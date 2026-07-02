@@ -71,5 +71,10 @@ upsert_job "aos-evaluate-trust" "0 1 * * *" "/tasks/evaluate-trust" "Evaluate ca
 upsert_job "aos-calibrate-attribution" "0 2 * * *" "/tasks/calibrate-attribution" "Calibrate marketing attribution models"
 upsert_job "aos-drain-outbox" "*/5 * * * *" "/tasks/drain-outbox" "Safety-net periodic drain of the transactional outbox"
 
+# Outbox drain — executes APPROVED operations. Safety net for the per-op Cloud
+# Tasks trigger: without a periodic drain, an approved Op can stall in APPROVED
+# indefinitely (its OutboxItem stays PENDING and never executes).
+upsert_job "aos-drain-outbox" "*/2 * * * *" "/tasks/drain-outbox" "Drain the outbox: execute APPROVED operations"
+
 echo "========================================"
 echo "=== Scheduler Provisioning Completed Successfully ==="

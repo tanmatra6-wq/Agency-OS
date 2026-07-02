@@ -25,7 +25,10 @@ def clean_env():
 @pytest.mark.asyncio
 async def test_onboarding_bootstrap(client, session: AsyncSession):
     # Test POST /api/v1/onboarding/bootstrap (using async client fixture!)
-    resp = await client.post("/api/v1/onboarding/bootstrap?name=LuxeDecor&domain=luxedecor.com&tier=dedicated")
+    resp = await client.post(
+        "/api/v1/onboarding/bootstrap?name=LuxeDecor&domain=luxedecor.com&tier=dedicated",
+        headers={"Authorization": "Bearer default-dev-token"},
+    )
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "onboarding_ready"
@@ -63,7 +66,8 @@ async def test_onboarding_connection_direct(client, session: AsyncSession):
         
         resp = await client.post(
             "/api/v1/onboarding/connection/direct?"
-            "tenant_id=t-3&brand_id=b-3&provider=klaviyo&api_key=pk_test_klaviyo_key_987"
+            "tenant_id=t-3&brand_id=b-3&provider=klaviyo&api_key=pk_test_klaviyo_key_987",
+            headers={"Authorization": "Bearer default-dev-token"},
         )
         assert resp.status_code == 200
         assert resp.json()["status"] == "direct_connection_established"
@@ -147,7 +151,6 @@ async def test_bootstrap_brand_identity_task(mock_llm_cls, clean_env, db_engine,
         args, kwargs = mock_get.call_args
         assert "b-4.myshopify.com/admin/api/2024-01/products.json" in args[0]
 
-
 def test_normalize_shopify_domain():
     from app.services.oauth import normalize_shopify_domain
     assert normalize_shopify_domain("ableys") == "ableys.myshopify.com"
@@ -168,6 +171,7 @@ async def test_onboarding_connection_config(client, session: AsyncSession):
     resp = await client.post(
         "/api/v1/onboarding/connection/config?tenant_id=t-5&brand_id=b-5&provider=google-ads",
         json={"developer_token": "real-dev-token-123"},
+        headers={"Authorization": "Bearer default-dev-token"},
     )
     assert resp.status_code == 200
     assert resp.json()["status"] == "connection_configured"
@@ -185,6 +189,7 @@ async def test_onboarding_connection_config_missing_404(client):
     resp = await client.post(
         "/api/v1/onboarding/connection/config?tenant_id=nope&brand_id=nope&provider=google-ads",
         json={"developer_token": "x"},
+        headers={"Authorization": "Bearer default-dev-token"},
     )
     assert resp.status_code == 404
 

@@ -14,7 +14,17 @@ from app.services.secrets import SecretManagerClient
 
 logger = logging.getLogger(__name__)
 
-SECRET_KEY = os.getenv("SECRET_KEY", "default-aos-state-secret-key").encode("utf-8")
+_DEFAULT_STATE_SECRET = "default-aos-state-secret-key"
+_SECRET_KEY_STR = os.getenv("SECRET_KEY", _DEFAULT_STATE_SECRET)
+# The OAuth state HMAC key is the CSRF/tamper protection binding tenant_id/brand_id/
+# redirect_uri into the flow. Running on the public source-code default in production
+# lets anyone forge a valid state, so fail closed at boot rather than silently degrade.
+if os.getenv("ENV") == "production" and _SECRET_KEY_STR == _DEFAULT_STATE_SECRET:
+    raise RuntimeError(
+        "PRODUCTION BOOT ERROR: SECRET_KEY must be set to a strong random value "
+        "(provision the aos-oauth-state-secret secret) — the built-in default is forbidden"
+    )
+SECRET_KEY = _SECRET_KEY_STR.encode("utf-8")
 
 def _base64url_encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("utf-8")
