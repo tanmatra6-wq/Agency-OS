@@ -8,7 +8,7 @@ import time
 
 from app.database import AsyncSessionLocal
 from app.models import Tenant
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 
 class TraceMiddleware(BaseHTTPMiddleware):
@@ -87,6 +87,13 @@ class TenantIsolationMiddleware(BaseHTTPMiddleware):
         try:
           session_maker = getattr(request.app.state, "db_session_maker", AsyncSessionLocal)
           async with session_maker() as session:
+            # Set the GUC to tenant_id before querying tenants table, so RLS policy
+            # (id = current_setting('app.current_tenant_id')) evaluates to True for this tenant.
+            if session.bind.dialect.name == "postgresql":
+              await session.execute(
+                  text("SELECT set_config('app.current_tenant_id', :tenant_id, true)"),
+                  {"tenant_id": tenant_id},
+              )
             stmt = select(Tenant.id, Tenant.is_active).where(Tenant.id == tenant_id)
             res = await session.execute(stmt)
             row = res.first()
