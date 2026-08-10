@@ -8,7 +8,13 @@ from app.kernel.loop import Adapter
 import uuid
 import tempfile
 import os
-from app.models import Connection, OpRow, BrandProperty
+from app.models import (
+    Connection, OpRow, BrandProperty, Tenant, TrustEvent, AuditEvent, OpTrace,
+    Approval, CostEntry, Order, OrderLine, Refund, FulfillmentCost, SpendFact,
+    ShadowDecision, TrustSnapshot, PolicyVersion, Touchpoint, OutboxItem,
+    Campaign, Brand, Cadence, CircuitBreakerRow, ConsentBasis, BrandObjective,
+    OpDependency
+)
 from app.services.secrets import SecretManagerClient
 from app.services.mcp import McpClient
 from app.services.storage import GcsClient
@@ -219,7 +225,6 @@ class ManageAdapter(Adapter):
             config = op.params.get("config", {})
             
             # Retrieve tenant to determine dedicated GCP project ID for secret isolation
-            from app.models import Tenant
             stmt_tenant = select(Tenant).where(Tenant.id == op.tenant_id)
             res_tenant = await session.execute(stmt_tenant)
             tenant = res_tenant.scalar_one_or_none()
@@ -231,7 +236,7 @@ class ManageAdapter(Adapter):
                 credential_ref = raw_token
             else:
                 secret_id = f"{op.tenant_id}-{op.brand_id}-{provider}-secret"
-                secrets_client = SecretManagerClient(project_id=gcp_project)
+                secrets_client = SecretManagerClient(tenant_id=op.tenant_id, project_id=gcp_project)
                 credential_ref = await secrets_client.write_secret(secret_id, raw_token)
             
             logger.info(f"Connecting {provider} for brand {op.brand_id} with credential reference {credential_ref}")
@@ -266,7 +271,7 @@ class ManageAdapter(Adapter):
                 try:
                     from app.services.brand_identity import bootstrap_brand_identity
                     shop = config.get("shop")
-                    secrets_client = SecretManagerClient(project_id=gcp_project)
+                    secrets_client = SecretManagerClient(tenant_id=op.tenant_id, project_id=gcp_project)
                     shopify_token = await secrets_client.read_secret(credential_ref)
                     await bootstrap_brand_identity(
                         db_session=session,
@@ -295,13 +300,12 @@ class ManageAdapter(Adapter):
             res = await session.execute(stmt)
             conn = res.scalar_one_or_none()
             if conn and conn.credential:
-                from app.models import Tenant
                 stmt_tenant = select(Tenant).where(Tenant.id == conn.tenant_id)
                 res_tenant = await session.execute(stmt_tenant)
                 tenant = res_tenant.scalar_one_or_none()
                 gcp_project = tenant.gcp_project if tenant else None
 
-                secrets_client = SecretManagerClient(project_id=gcp_project)
+                secrets_client = SecretManagerClient(tenant_id=op.tenant_id, project_id=gcp_project)
                 await secrets_client.delete_secret(conn.credential)
             
             stmt_del = delete(Connection).where(
@@ -328,13 +332,12 @@ class ManageAdapter(Adapter):
                 CONNECTOR_OPERATIONS.labels(operation="rotate", provider=provider or "unknown", result="failure").inc()
                 return ExecResult(ok=False, detail={"error": "Connection record not found for rotation"})
             
-            from app.models import Tenant
             stmt_tenant = select(Tenant).where(Tenant.id == op.tenant_id)
             res_tenant = await session.execute(stmt_tenant)
             tenant = res_tenant.scalar_one_or_none()
             gcp_project = tenant.gcp_project if tenant else None
 
-            secrets_client = SecretManagerClient(project_id=gcp_project)
+            secrets_client = SecretManagerClient(tenant_id=op.tenant_id, project_id=gcp_project)
             
             refresh_token_ref = conn.config.get("refresh_token_ref")
             if not refresh_token_ref and conn.config.get("refresh_token"):
@@ -352,7 +355,7 @@ class ManageAdapter(Adapter):
                 return ExecResult(ok=False, detail={"error": "No refresh token or reference found in connection config"})
                 
             from app.services.oauth import OauthService
-            oauth_service = OauthService()
+            oauth_service = OauthService(tenant_id=op.tenant_id)
             
             try:
                 token_data = await oauth_service.refresh_token(
@@ -426,13 +429,12 @@ class ManageAdapter(Adapter):
                 return ExecResult(ok=False, detail={"error": "Cannot verify a revoked connection"})
                 
             try:
-                from app.models import Tenant
                 stmt_tenant = select(Tenant).where(Tenant.id == op.tenant_id)
                 res_tenant = await session.execute(stmt_tenant)
                 tenant = res_tenant.scalar_one_or_none()
                 gcp_project = tenant.gcp_project if tenant else None
 
-                secrets_client = SecretManagerClient(project_id=gcp_project)
+                secrets_client = SecretManagerClient(tenant_id=op.tenant_id, project_id=gcp_project)
                 token = await secrets_client.read_secret(conn.credential)
                 if not token:
                     raise ValueError("Retrieved token is empty")
@@ -440,7 +442,6 @@ class ManageAdapter(Adapter):
                 conn.status = "error"
                 conn.last_error = f"Secret Manager retrieval failed: {str(e)}"
                 # Emit verify_failure trust event
-                from app.models import TrustEvent
                 event = TrustEvent(
                     tenant_id=op.tenant_id,
                     brand_id=op.brand_id,
@@ -470,7 +471,6 @@ class ManageAdapter(Adapter):
                 conn.last_error = None
                 
                 # Emit verified_success trust event
-                from app.models import TrustEvent
                 event = TrustEvent(
                     tenant_id=op.tenant_id,
                     brand_id=op.brand_id,
@@ -485,7 +485,6 @@ class ManageAdapter(Adapter):
                 conn.last_error = f"Verification failed: {str(e)}"
                 
                 # Emit verify_failure trust event
-                from app.models import TrustEvent
                 event = TrustEvent(
                     tenant_id=op.tenant_id,
                     brand_id=op.brand_id,
@@ -520,13 +519,12 @@ class ManageAdapter(Adapter):
                 
             if conn.credential:
                 try:
-                    from app.models import Tenant
                     stmt_tenant = select(Tenant).where(Tenant.id == conn.tenant_id)
                     res_tenant = await session.execute(stmt_tenant)
                     tenant = res_tenant.scalar_one_or_none()
                     gcp_project = tenant.gcp_project if tenant else None
 
-                    secrets_client = SecretManagerClient(project_id=gcp_project)
+                    secrets_client = SecretManagerClient(tenant_id=op.tenant_id, project_id=gcp_project)
                     await secrets_client.delete_secret(conn.credential)
                 except Exception as e:
                     logger.error(f"Failed to delete secret: {e}")
@@ -741,7 +739,6 @@ VALUES ('{op.id}', CURRENT_TIMESTAMP);
         elif op.action == "manage.shopify.sync_order":
             if not session:
                 return ExecResult(ok=False, detail={"error": "Database session required"})
-            from app.models import Order
             order_id = op.params.get("order_id")
             amount_minor = op.params.get("amount_minor")
             stmt = select(Order).where(Order.id == str(order_id))
@@ -921,7 +918,6 @@ VALUES ('{op.id}', CURRENT_TIMESTAMP);
             if not target_tenant_id:
                 raise ValueError("Missing target_tenant_id in params")
                 
-            from app.models import Tenant
             tenant = await session.get(Tenant, target_tenant_id)
             if not tenant:
                 return ExecResult(ok=False, detail={"message": f"Tenant {target_tenant_id} not found"})
@@ -948,7 +944,6 @@ VALUES ('{op.id}', CURRENT_TIMESTAMP);
             if not target_tenant_id:
                 raise ValueError("Missing target_tenant_id in params")
                 
-            from app.models import Tenant
             tenant = await session.get(Tenant, target_tenant_id)
             if not tenant:
                 return ExecResult(ok=False, detail={"message": f"Tenant {target_tenant_id} not found"})
@@ -968,15 +963,11 @@ VALUES ('{op.id}', CURRENT_TIMESTAMP);
                 await session.flush()
                 
             from sqlalchemy import update
-            from app.models import AuditEvent, OpTrace, Approval, CostEntry, Order, OrderLine, Refund, FulfillmentCost, SpendFact, ShadowDecision, TrustEvent, TrustSnapshot, PolicyVersion, Touchpoint, OutboxItem
-            
             child_tables = [AuditEvent, OpTrace, Approval, OpRow, CostEntry, Order, OrderLine, Refund, FulfillmentCost, SpendFact, ShadowDecision, TrustEvent, TrustSnapshot, PolicyVersion, Touchpoint, OutboxItem]
             for table in child_tables:
                 stmt = update(table).where(table.tenant_id == target_tenant_id).values(tenant_id="deleted_tenant")
                 await session.execute(stmt)
                 
-            from app.models import Campaign, Brand, Cadence, CircuitBreakerRow, ConsentBasis, BrandObjective, OpDependency
-            
             other_tables = [Connection, Campaign, BrandProperty, Cadence, CircuitBreakerRow, ConsentBasis, BrandObjective, OpDependency]
             for table in other_tables:
                 stmt = delete(table).where(table.tenant_id == target_tenant_id)
@@ -1005,7 +996,6 @@ VALUES ('{op.id}', CURRENT_TIMESTAMP);
             with open(profile_path, "r", encoding="utf-8") as f:
                 instruction = f.read()
 
-            from app.models import ConsentBasis
             stmt = select(ConsentBasis).where(ConsentBasis.tenant_id == op.tenant_id)
             res = await session.execute(stmt)
             consents = res.scalars().all()
@@ -1114,6 +1104,10 @@ VALUES ('{op.id}', CURRENT_TIMESTAMP);
             if not session:
                 return VerifyResult(ok=False, checks={"session_active": False}, detail={"error": "Database session required"})
                 
+            stmt_tenant = select(Tenant).where(Tenant.id == op.tenant_id)
+            res_tenant = await session.execute(stmt_tenant)
+            tenant = res_tenant.scalar_one_or_none()
+            gcp_project = tenant.gcp_project if tenant else None
             provider = op.params.get("provider", "shopify")
             stmt = select(Connection).where(
                 Connection.tenant_id == op.tenant_id,
@@ -1126,7 +1120,7 @@ VALUES ('{op.id}', CURRENT_TIMESTAMP);
                 return VerifyResult(ok=False, checks={"connection_in_db": False}, detail={"error": "Connection record not found"})
                 
             try:
-                secrets_client = SecretManagerClient()
+                secrets_client = SecretManagerClient(tenant_id=op.tenant_id, project_id=gcp_project)
                 token = await secrets_client.read_secret(conn.credential)
                 if not token:
                     raise ValueError("Retrieved token is empty")
@@ -1139,28 +1133,30 @@ VALUES ('{op.id}', CURRENT_TIMESTAMP);
                     detail={"error": f"Secret Manager retrieval failed: {e}"}
                 )
 
-            # --- Real Shopify MCP Tool Call Integration ---
-            try:
-                mcp_url = conn.config.get("mcp_server_url")
-                mcp = McpClient(server_url=mcp_url)
-                tool_res = await mcp.call_tool("shopify_get_shop_info", {})
-                await mcp.close()
-                
-                import json
-                content_text = tool_res["content"][0]["text"]
-                shop_info = json.loads(content_text)
-                logger.info(f"Shopify MCP tool call shopify_get_shop_info succeeded: {shop_info}")
-            except Exception as e:
-                logger.error(f"Shopify MCP tool call failed: {e}")
-                return VerifyResult(
-                    ok=False,
-                    checks={
-                        "credentials_valid": True,
-                        "secret_retrieval_ok": True,
-                        "mcp_tool_call_ok": False
-                    },
-                    detail={"error": f"Shopify MCP tool call failed: {e}"}
-                )
+            # --- Optional Shopify MCP Tool Call Integration ---
+            shop_info = {}
+            mcp_url = conn.config.get("mcp_server_url")
+            if mcp_url:
+                try:
+                    mcp = McpClient(server_url=mcp_url)
+                    tool_res = await mcp.call_tool("shopify_get_shop_info", {})
+                    await mcp.close()
+                    
+                    import json
+                    content_text = tool_res["content"][0]["text"]
+                    shop_info = json.loads(content_text)
+                    logger.info(f"Shopify MCP tool call shopify_get_shop_info succeeded: {shop_info}")
+                except Exception as e:
+                    logger.error(f"Shopify MCP tool call failed: {e}")
+                    return VerifyResult(
+                        ok=False,
+                        checks={
+                            "credentials_valid": True,
+                            "secret_retrieval_ok": True,
+                            "mcp_tool_call_ok": False
+                        },
+                        detail={"error": f"Shopify MCP tool call failed: {e}"}
+                    )
 
             # Mark active on success
             conn.status = "active"
@@ -1257,14 +1253,12 @@ VALUES ('{op.id}', CURRENT_TIMESTAMP);
             return VerifyResult(ok=True, checks={"completed": True})
         elif op.action == "manage.tenant.offboard":
             target_tenant_id = op.params.get("target_tenant_id")
-            from app.models import Tenant
             tenant = await session.get(Tenant, target_tenant_id)
             if tenant and not tenant.is_active:
                 return VerifyResult(ok=True, checks={"tenant_inactive": True, "pii_scrubbed": "Offboarded" in tenant.name})
             return VerifyResult(ok=False, checks={"tenant_inactive": False})
         elif op.action == "manage.tenant.hard_delete":
             target_tenant_id = op.params.get("target_tenant_id")
-            from app.models import Tenant
             tenant = await session.get(Tenant, target_tenant_id)
             if tenant is None:
                 return VerifyResult(ok=True, checks={"tenant_row_dropped": True})

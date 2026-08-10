@@ -6,6 +6,7 @@ import hashlib
 import base64
 import datetime as dt
 import urllib.parse as urlparse
+import uuid
 import httpx
 import logging
 from typing import Optional, Dict, Any
@@ -14,17 +15,18 @@ from app.services.secrets import SecretManagerClient
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_STATE_SECRET = "default-aos-state-secret-key"
-_SECRET_KEY_STR = os.getenv("SECRET_KEY", _DEFAULT_STATE_SECRET)
-# The OAuth state HMAC key is the CSRF/tamper protection binding tenant_id/brand_id/
-# redirect_uri into the flow. Running on the public source-code default in production
-# lets anyone forge a valid state, so fail closed at boot rather than silently degrade.
-if os.getenv("ENV") == "production" and _SECRET_KEY_STR == _DEFAULT_STATE_SECRET:
+_DEFAULT_STATE_SECRET_REF = "projects/control-plane-project/secrets/aos-oauth-state-secret/versions/latest"
+_configured_secret_key = os.getenv("SECRET_KEY")
+if _configured_secret_key and _configured_secret_key.startswith("projects/"):
+    _SECRET_KEY_STR = _configured_secret_key
+else:
+    _SECRET_KEY_STR = _DEFAULT_STATE_SECRET_REF
+
+if os.getenv("ENV") == "production" and not os.getenv("SECRET_KEY", "").startswith("projects/"):
     raise RuntimeError(
-        "PRODUCTION BOOT ERROR: SECRET_KEY must be set to a strong random value "
-        "(provision the aos-oauth-state-secret secret) — the built-in default is forbidden"
+        "PRODUCTION BOOT ERROR: SECRET_KEY must be a valid Secret Manager reference "
+        "(provision the aos-oauth-state-secret secret) — literal keys are forbidden"
     )
-SECRET_KEY = _SECRET_KEY_STR.encode("utf-8")
 
 def _base64url_encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b"=").decode("utf-8")
@@ -34,12 +36,7 @@ def _base64url_decode(data: str) -> bytes:
     return base64.urlsafe_b64decode(data + padding)
 
 def normalize_shopify_domain(shop: str) -> str:
-    """Return the canonical '<handle>.myshopify.com' host for a Shopify shop.
-
-    Accepts a bare handle ('ableys'), a full myshopify domain
-    ('ableys.myshopify.com'), or a URL ('https://ableys.myshopify.com/...') and
-    normalizes to the host form.
-    """
+    """Return the canonical '<handle>.myshopify.com' host for a Shopify shop."""
     shop = (shop or "").strip().lower()
     if "://" in shop:
         shop = urlparse.urlparse(shop).hostname or shop
@@ -48,59 +45,107 @@ def normalize_shopify_domain(shop: str) -> str:
         return shop
     return f"{shop}.myshopify.com"
 
-def generate_oauth_state(tenant_id: str, brand_id: str, redirect_uri: str, provider: Optional[str] = None, shop: Optional[str] = None) -> str:
-    """Generates a cryptographically signed, short-lived state token for OAuth flow."""
-    expires_at = int((dt.datetime.utcnow() + dt.timedelta(minutes=15)).timestamp())
-    payload = {
-        "tenant_id": tenant_id,
-        "brand_id": brand_id,
-        "redirect_uri": redirect_uri,
-        "expires_at": expires_at
-    }
-    if provider:
-        payload["provider"] = provider
-    if shop:
-        payload["shop"] = shop
-    payload_json = json.dumps(payload, sort_keys=True).encode("utf-8")
-    payload_b64 = _base64url_encode(payload_json)
+class OAuthStateSigner:
+    """Cryptographically signs and validates short-lived OAuth CSRF state tokens.
     
-    # Sign the payload
-    signature = hmac.new(SECRET_KEY, payload_b64.encode("utf-8"), hashlib.sha256).digest()
-    signature_b64 = _base64url_encode(signature)
-    
-    return f"{payload_b64}.{signature_b64}"
+    Security Contract:
+    The signer accepts ONLY raw resolved key material (bytes). Literal secret references,
+    empty keys, and keys shorter than 16 bytes are strictly rejected.
+    """
 
+    def __init__(self, signing_key: bytes):
+        if isinstance(signing_key, str):
+            raise ValueError("Literal secret references cannot be used as cryptographic keys.")
+        if not isinstance(signing_key, (bytes, bytearray)) or len(signing_key) < 16:
+            raise ValueError("Literal secret references cannot be used as cryptographic keys.")
+        self._signing_key = bytes(signing_key)
 
-def verify_oauth_state(state: str) -> Dict[str, Any]:
-    """Verifies the state token signature and expiration, returning the decoded payload."""
-    if not state or "." not in state:
-        raise ValueError("Invalid state format")
+    def generate_state(
+        self,
+        tenant_id: str,
+        brand_id: str,
+        redirect_uri: str,
+        provider: Optional[str] = None,
+        shop: Optional[str] = None,
+        nonce: Optional[str] = None
+    ) -> str:
+        expires_at = int((dt.datetime.utcnow() + dt.timedelta(minutes=15)).timestamp())
+        payload = {
+            "tenant_id": tenant_id,
+            "brand_id": brand_id,
+            "redirect_uri": redirect_uri,
+            "expires_at": expires_at,
+            "nonce": nonce or uuid.uuid4().hex,
+            "issued_at": int(dt.datetime.utcnow().timestamp())
+        }
+        if provider:
+            payload["provider"] = provider
+        if shop:
+            payload["shop"] = shop
+        payload_json = json.dumps(payload, sort_keys=True).encode("utf-8")
+        payload_b64 = _base64url_encode(payload_json)
         
-    parts = state.split(".")
-    if len(parts) != 2:
-        raise ValueError("Invalid state format")
-        
-    payload_b64, signature_b64 = parts
+        signature = hmac.new(self._signing_key, payload_b64.encode("utf-8"), hashlib.sha256).digest()
+        signature_b64 = _base64url_encode(signature)
+        return f"{payload_b64}.{signature_b64}"
+
+    def verify_state(self, state: str) -> Dict[str, Any]:
+        if not state or "." not in state:
+            raise ValueError("Invalid state format")
+        parts = state.split(".")
+        if len(parts) != 2:
+            raise ValueError("Invalid state format")
+        payload_b64, signature_b64 = parts
+        expected_signature = hmac.new(self._signing_key, payload_b64.encode("utf-8"), hashlib.sha256).digest()
+        expected_signature_b64 = _base64url_encode(expected_signature)
+        if not hmac.compare_digest(signature_b64, expected_signature_b64):
+            raise ValueError("Invalid state signature")
+        try:
+            payload_json = _base64url_decode(payload_b64)
+            payload = json.loads(payload_json)
+        except Exception as e:
+            raise ValueError(f"Failed to decode state payload: {e}")
+        now = dt.datetime.utcnow().timestamp()
+        if now > payload.get("expires_at", 0):
+            raise ValueError("State token expired")
+        if payload.get("issued_at") and payload.get("issued_at") > now + 300:
+            raise ValueError("State token issued in future")
+        return payload
+
+async def resolve_state_secret() -> bytes:
+    """Resolves the HMAC signing key bytes from Secret Manager.
     
-    # Recalculate signature
-    expected_signature = hmac.new(SECRET_KEY, payload_b64.encode("utf-8"), hashlib.sha256).digest()
-    expected_signature_b64 = _base64url_encode(expected_signature)
-    
-    if not hmac.compare_digest(signature_b64, expected_signature_b64):
-        raise ValueError("Invalid state signature")
-        
+    Fails closed if the configured secret reference is a literal or missing.
+    """
+    secret_ref = os.getenv("OAUTH_STATE_SECRET_NAME", _SECRET_KEY_STR)
+    if not secret_ref.startswith("projects/"):
+        raise ValueError("Literal secret references cannot be used as cryptographic keys.")
     try:
-        payload_json = _base64url_decode(payload_b64)
-        payload = json.loads(payload_json)
+        environment = os.getenv("AOS_ENV", "dev")
+        secrets_client = SecretManagerClient(tenant_id="system", environment=environment)
+        val = await secrets_client.read_secret(secret_ref, purpose="oauth-state")
+        if isinstance(val, str):
+            val = val.encode("utf-8")
+        if len(val) < 16:
+            raise ValueError("Literal secret references cannot be used as cryptographic keys.")
+        return val
+    except ValueError:
+        raise
     except Exception as e:
-        raise ValueError(f"Failed to decode state payload: {e}")
-        
-    # Check expiration
-    now = dt.datetime.utcnow().timestamp()
-    if now > payload.get("expires_at", 0):
-        raise ValueError("State token expired")
-        
-    return payload
+        logger.error(f"Failed to resolve SECRET_KEY from Secret Manager: {e}")
+        raise RuntimeError("Failed to resolve oauth state secret")
+
+async def generate_oauth_state(tenant_id: str, brand_id: str, redirect_uri: str, provider: Optional[str] = None, shop: Optional[str] = None) -> str:
+    """Generates a cryptographically signed, short-lived state token for OAuth flow."""
+    secret_key = await resolve_state_secret()
+    signer = OAuthStateSigner(signing_key=secret_key)
+    return signer.generate_state(tenant_id, brand_id, redirect_uri, provider=provider, shop=shop)
+
+async def verify_oauth_state(state: str) -> Dict[str, Any]:
+    """Verifies the state token signature and expiration, returning the decoded payload."""
+    secret_key = await resolve_state_secret()
+    signer = OAuthStateSigner(signing_key=secret_key)
+    return signer.verify_state(state)
 
 def validate_redirect_uri(redirect_uri: str) -> bool:
     """Validates that the redirect URI is allowed to prevent open redirect vulnerabilities."""
@@ -136,8 +181,10 @@ def _parse_secret_id(secret_ref: str) -> str:
 class OauthService:
     """Handles OAuth token exchanges, refreshes, and secret storage."""
 
-    def __init__(self):
-        self.secrets_client = SecretManagerClient()
+    def __init__(self, tenant_id: str = None):
+        environment = os.getenv("AOS_ENV", "dev")
+        self.tenant_id = tenant_id or "system"
+        self.secrets_client = SecretManagerClient(tenant_id=self.tenant_id, environment=environment)
 
     async def refresh_token(
         self, 

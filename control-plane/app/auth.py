@@ -65,23 +65,37 @@ def verify_jwt(token: str, secret: str) -> dict | None:
         return None
 
 
+async def resolve_operator_secret() -> str:
+    if OPERATOR_TOKEN.startswith("projects/"):
+        from app.services.secrets import SecretManagerClient
+        try:
+            secrets_client = SecretManagerClient()
+            return await secrets_client.read_secret(OPERATOR_TOKEN, purpose="auth")
+        except Exception as e:
+            logger.error(f"Failed to resolve OPERATOR_TOKEN from Secret Manager: {e}")
+            raise RuntimeError("Failed to resolve operator token")
+    if os.getenv("ENV") == "production":
+        raise ValueError("Literal secret references cannot be used as cryptographic keys. OPERATOR_TOKEN must be a Secret Manager reference in production.")
+    return OPERATOR_TOKEN
+
 async def verify_operator_auth(authorization: str | None = Header(default=None)):
     """Verifies that the request carries a valid Operator Bearer Token or a valid signed JWT session token."""
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(401, "Missing or invalid Authorization header")
     token = authorization[7:]
     
+    secret = await resolve_operator_secret()
+    
     # 1. Compare directly against raw OPERATOR_TOKEN (backward compatibility)
-    if hmac.compare_digest(token, OPERATOR_TOKEN):
+    if hmac.compare_digest(token, secret):
         return
         
     # 2. Try to verify as signed JWT session token
-    payload = verify_jwt(token, OPERATOR_TOKEN)
+    payload = verify_jwt(token, secret)
     if payload and payload.get("role") == "OPERATOR_AUTHENTICATED":
         return
         
     raise HTTPException(403, "Forbidden: Invalid operator token or session expired")
-
 
 async def resolved_operator_role(authorization: str | None = Header(default=None)) -> str | None:
     """Resolves the operator's role if authenticated, else returns None."""
@@ -91,10 +105,12 @@ async def resolved_operator_role(authorization: str | None = Header(default=None
         raise HTTPException(401, "Missing or invalid Authorization header")
     token = authorization[7:]
     
-    if hmac.compare_digest(token, OPERATOR_TOKEN):
+    secret = await resolve_operator_secret()
+    
+    if hmac.compare_digest(token, secret):
         return "OPERATOR_AUTHENTICATED"
         
-    payload = verify_jwt(token, OPERATOR_TOKEN)
+    payload = verify_jwt(token, secret)
     if payload and payload.get("role") == "OPERATOR_AUTHENTICATED":
         return "OPERATOR_AUTHENTICATED"
         

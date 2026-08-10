@@ -573,18 +573,58 @@ async def promote_recipe(body: RecipePromoteIn):
 
     os.makedirs(os.path.dirname(production_path), exist_ok=True)
 
-    if os.path.exists(production_path):
-         shutil.rmtree(production_path)
-    shutil.copytree(experimental_path, production_path)
-
     try:
+        import tempfile
+        import subprocess
+
+        env = os.environ.copy()
+        env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+        env["GIT_CONFIG_SYSTEM"] = "/dev/null"
+        env["GIT_CONFIG_NOSYSTEM"] = "1"
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        
+        # In a real environment, we would request a short-lived token here
+        # access_token = await get_short_lived_git_token()
+        # For now, we simulate this with the ephemeral workspace constraints
+
         repo_dir = os.path.abspath(os.path.join(RECIPES_ROOT, ".."))
-        subprocess.run(["git", "add", f"recipes/{body.recipe_name}/{body.version}/"], cwd=repo_dir, check=True, capture_output=True)
-        commit_res = subprocess.run(
-            ["git", "commit", "-m", f"prod(catalog): promote {body.recipe_name} {body.version} to production", "-m", "TAG=agy"],
-            cwd=repo_dir, check=True, capture_output=True
-        )
-        commit_stdout = commit_res.stdout.decode()
+        with tempfile.TemporaryDirectory(prefix="aos-git-worker-") as temp_dir:
+            # Clone locally to an ephemeral workspace
+            ephemeral_repo = os.path.join(temp_dir, "ephemeral_repo")
+            subprocess.run(["git", "clone", repo_dir, ephemeral_repo], env=env, check=True, capture_output=True)
+            
+            # Copy experimental recipe into ephemeral workspace
+            ephemeral_prod_path = os.path.join(ephemeral_repo, "recipes", body.recipe_name, body.version)
+            os.makedirs(os.path.dirname(ephemeral_prod_path), exist_ok=True)
+            if os.path.exists(ephemeral_prod_path):
+                 shutil.rmtree(ephemeral_prod_path)
+            shutil.copytree(experimental_path, ephemeral_prod_path)
+            
+            # Commit inside ephemeral workspace
+            subprocess.run(["git", "config", "user.email", "worker@agencyos.local"], env=env, cwd=ephemeral_repo, check=True)
+            subprocess.run(["git", "config", "user.name", "AOS Git Worker"], env=env, cwd=ephemeral_repo, check=True)
+            
+            subprocess.run(["git", "add", f"recipes/{body.recipe_name}/{body.version}/"], env=env, cwd=ephemeral_repo, check=True, capture_output=True)
+            commit_res = subprocess.run(
+                ["git", "commit", "-m", f"prod(catalog): promote {body.recipe_name} {body.version} to production", "-m", "TAG=agy"],
+                env=env, cwd=ephemeral_repo, check=True, capture_output=True
+            )
+            
+            # Push the commit back to the origin
+            # If the origin (repo_dir) is checked out, push might fail unless we push to a specific branch or it's bare.
+            # In Agency-OS, the control plane is doing a local copy anyway so the filesystem is already updated above with shutil.copytree.
+            # But the commit is lost if we don't push it or do it on the real repo!
+            # Let's just push it to a temporary branch in the origin, and then fast-forward the origin.
+            branch_name = f"promote-{body.recipe_name}-{body.version}"
+            subprocess.run(["git", "push", "origin", f"HEAD:{branch_name}"], env=env, cwd=ephemeral_repo, check=True, capture_output=True)
+            
+            commit_stdout = commit_res.stdout.decode()
+            
+        # Fast-forward the local repo (acting as origin here) to include the commit
+        # This allows the ephemeral worker to securely push changes.
+        subprocess.run(["git", "merge", branch_name, "--ff-only"], cwd=repo_dir, check=True, capture_output=True)
+        subprocess.run(["git", "branch", "-d", branch_name], cwd=repo_dir, check=True, capture_output=True)
+            
     except Exception as e:
         commit_stdout = f"Git commit skipped or failed: {e}"
 

@@ -78,7 +78,7 @@ async def connect_direct_api_key(
 
     secret_id = f"{tenant_id}-{brand_id}-{provider}-secret"
     
-    oauth_service = OauthService()
+    oauth_service = OauthService(tenant_id=tenant_id)
     credential_ref = await oauth_service.secrets_client.write_secret(secret_id, api_key)
     
     conn = Connection(

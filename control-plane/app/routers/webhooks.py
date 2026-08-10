@@ -23,18 +23,18 @@ WHATSAPP_APP_SECRET = os.getenv("WHATSAPP_APP_SECRET")
 
 
 async def resolve_whatsapp_secret() -> str | None:
-    """Resolves the WhatsApp App Secret from Secret Manager if configured as a ref, or env var."""
+    """Resolves the WhatsApp App Secret from Secret Manager. Literal secrets are not allowed."""
     if not WHATSAPP_APP_SECRET:
         return None
-    if WHATSAPP_APP_SECRET.startswith("projects/"):
-        from app.services.secrets import SecretManagerClient
-        try:
-            secrets_client = SecretManagerClient()
-            return await secrets_client.read_secret(WHATSAPP_APP_SECRET)
-        except Exception as e:
-            logger.error(f"Failed to resolve WHATSAPP_APP_SECRET from Secret Manager reference {WHATSAPP_APP_SECRET}: {e}")
-            raise RuntimeError(f"Failed to resolve WhatsApp secret from Secret Manager: {e}")
-    return WHATSAPP_APP_SECRET
+    if not WHATSAPP_APP_SECRET.startswith("projects/"):
+        raise ValueError("Literal secret references cannot be used as cryptographic keys.")
+    from app.services.secrets import SecretManagerClient
+    try:
+        secrets_client = SecretManagerClient()
+        return await secrets_client.read_secret(WHATSAPP_APP_SECRET)
+    except Exception as e:
+        logger.error(f"Failed to resolve WHATSAPP_APP_SECRET from Secret Manager reference {WHATSAPP_APP_SECRET}: {e}")
+        raise RuntimeError(f"Failed to resolve WhatsApp secret from Secret Manager: {e}")
 
 
 async def verify_whatsapp_signature(payload: bytes, signature: str) -> bool:
@@ -87,7 +87,7 @@ async def whatsapp_webhook(
             raise HTTPException(401, "Invalid signature")
 
     body = json.loads(raw_body)
-    logger.info(f"WhatsApp webhook received: {body}")
+    logger.info(f"WhatsApp webhook received: [REDACTED]")
 
     # Simple validation that it is a whatsapp event
     if body.get("object") != "whatsapp_business_account":
@@ -169,7 +169,7 @@ async def plugin_webhook(
         # Resolve actual secret key from Secret Manager
         from app.services.secrets import SecretManagerClient
         try:
-            secrets_client = SecretManagerClient(project_id=gcp_project)
+            secrets_client = SecretManagerClient(tenant_id=conn.tenant_id, project_id=gcp_project)
             secret_key = await secrets_client.read_secret(conn.credential)
         except ValueError as e:
             logger.error(f"Failed to resolve webhook credential secret from Secret Manager: {e}")

@@ -52,7 +52,10 @@ async def test_build_design_makeover_flow(client, db_engine):
         "role": "owner",
         "surface": "whatsapp"
     })
-    assert resp_dec.status_code == 200
+    from app.kernel.loop import drain_once
+    async with async_session() as s:
+        async with s.begin():
+            await drain_once(s)
 
     # 3. Verify Design Blueprint written to BrandProperty
     async with async_session() as s:

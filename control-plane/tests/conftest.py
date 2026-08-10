@@ -413,21 +413,23 @@ def mock_secrets_client():
     # In-memory storage for secrets
     secrets_store = {}
     
-    async def default_write(secret_id, value):
+    async def default_write(secret_id, value, *args, **kwargs):
         if mock.write_secret._mock_return_value is not unittest.mock.DEFAULT:
             return mock.write_secret._mock_return_value
         ref = f"projects/test-project/secrets/{secret_id}/versions/1"
         secrets_store[ref] = value
         return ref
 
-    async def default_read(secret_ref):
+    async def default_read(secret_ref, *args, **kwargs):
         if mock.read_secret._mock_return_value is not unittest.mock.DEFAULT:
             return mock.read_secret._mock_return_value
         if secret_ref not in secrets_store:
+            if "oauth-state" in secret_ref or "aos-oauth-state-secret" in secret_ref:
+                return "system-mock-secret-key-with-at-least-32-bytes-long!!"
             raise ValueError(f"Secret not found: {secret_ref}")
         return secrets_store[secret_ref]
 
-    async def default_delete(secret_ref):
+    async def default_delete(secret_ref, *args, **kwargs):
         if mock.delete_secret._mock_return_value is not unittest.mock.DEFAULT:
             return mock.delete_secret._mock_return_value
         if secret_ref in secrets_store:

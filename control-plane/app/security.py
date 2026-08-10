@@ -16,14 +16,16 @@ if os.getenv("ENV") == "production" and OPERATOR_TOKEN == "default-dev-token":
     )
 
 
+from app.auth import resolve_operator_secret
+
 async def verify_operator_auth(authorization: str | None = Header(default=None)):
     """Verifies the request carries a valid Operator Bearer Token."""
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(401, "Missing or invalid Authorization header")
     token = authorization[7:]
-    if not hmac.compare_digest(token, OPERATOR_TOKEN):
+    secret = await resolve_operator_secret()
+    if not hmac.compare_digest(token, secret):
         raise HTTPException(403, "Forbidden: Invalid operator token")
-
 
 async def resolved_operator_role(authorization: str | None = Header(default=None)) -> str | None:
     """Resolves the operator's role if authenticated, else returns None."""
@@ -32,7 +34,8 @@ async def resolved_operator_role(authorization: str | None = Header(default=None
     if not authorization.startswith("Bearer "):
         raise HTTPException(401, "Missing or invalid Authorization header")
     token = authorization[7:]
-    if not hmac.compare_digest(token, OPERATOR_TOKEN):
+    secret = await resolve_operator_secret()
+    if not hmac.compare_digest(token, secret):
         raise HTTPException(403, "Forbidden: Invalid operator token")
     return "OPERATOR_AUTHENTICATED"
 

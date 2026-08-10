@@ -83,12 +83,12 @@ async def oauth_authorize(
     if not validate_redirect_uri(redirect_uri):
         raise HTTPException(status_code=400, detail="Invalid redirect_uri")
 
-    state = generate_oauth_state(tid, brand_id, redirect_uri, provider=provider, shop=shop)
+    state = await generate_oauth_state(tid, brand_id, redirect_uri, provider=provider, shop=shop)
 
     callback_uri = str(request.url_for('oauth_callback'))
     if provider == "shopify":
         shop_domain = normalize_shopify_domain(shop or brand_id)
-        state = generate_oauth_state(tid, brand_id, redirect_uri, provider=provider, shop=shop_domain)
+        state = await generate_oauth_state(tid, brand_id, redirect_uri, provider=provider, shop=shop_domain)
         client_id = os.getenv("SHOPIFY_CLIENT_ID", "mock-shopify-client-id")
         auth_url = (
             f"https://{shop_domain}/admin/oauth/authorize?"
@@ -125,7 +125,7 @@ async def oauth_callback(
         raise HTTPException(status_code=400, detail=f"OAuth error: {error} - {error_description}")
 
     try:
-        payload = verify_oauth_state(state)
+        payload = await verify_oauth_state(state)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -147,7 +147,7 @@ async def oauth_callback(
             {"tenant_id": tenant_id_val},
         )
 
-    oauth_service = OauthService()
+    oauth_service = OauthService(tenant_id=tenant_id_val)
     try:
         shop = payload.get("shop")
         callback_uri = str(request.url_for("oauth_callback"))

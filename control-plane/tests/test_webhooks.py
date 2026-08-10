@@ -19,12 +19,19 @@ def _generate_shopify_signature(payload_bytes: bytes, secret: str) -> str:
 @pytest.fixture(autouse=True)
 async def setup_connection_and_trust(db_engine):
     from app.services.secrets import SecretManagerClient
-    secrets_client = SecretManagerClient()
-    # Write connection credential key to Secret Manager mock registry
-    credential_ref = await secrets_client.write_secret("shopify-secret-key-123", "shopify-secret-key-123")
+    from app.models import Tenant
 
     from sqlalchemy.ext.asyncio import async_sessionmaker
     async_session = async_sessionmaker(db_engine, expire_on_commit=False)
+    async with async_session() as s:
+        async with s.begin():
+            tenant = Tenant(id="tenant-webhook-test", name="Webhook Test Tenant", gcp_project="tenant-webhook-gcp")
+            s.add(tenant)
+
+    secrets_client = SecretManagerClient(tenant_id="tenant-webhook-test", project_id="tenant-webhook-gcp")
+    # Write connection credential key to Secret Manager mock registry
+    credential_ref = await secrets_client.write_secret("shopify-secret-key-123", "shopify-secret-key-123")
+
     async with async_session() as s:
         async with s.begin():
             # Seed Shopify connection
@@ -51,7 +58,7 @@ async def setup_connection_and_trust(db_engine):
 @pytest.mark.asyncio
 async def test_shopify_webhook_proposes_op_successfully(client, db_engine):
     from app.services.secrets import SecretManagerClient
-    await SecretManagerClient().write_secret("shopify-secret-key-123", "shopify-secret-key-123")
+    await SecretManagerClient(tenant_id="tenant-webhook-test", project_id="tenant-webhook-gcp").write_secret("shopify-secret-key-123", "shopify-secret-key-123")
 
     payload = b'{"id": 998877, "total_price": "149.99", "created_at": "2026-06-15T05:00:00Z"}'
     signature = _generate_shopify_signature(payload, "shopify-secret-key-123")
@@ -99,7 +106,7 @@ async def test_shopify_webhook_proposes_op_successfully(client, db_engine):
 @pytest.mark.asyncio
 async def test_shopify_webhook_bad_signature_rejected(client):
     from app.services.secrets import SecretManagerClient
-    await SecretManagerClient().write_secret("shopify-secret-key-123", "shopify-secret-key-123")
+    await SecretManagerClient(tenant_id="tenant-webhook-test", project_id="tenant-webhook-gcp").write_secret("shopify-secret-key-123", "shopify-secret-key-123")
 
     payload = b'{"id": 998877, "total_price": "149.99"}'
     headers = {
@@ -143,7 +150,7 @@ async def test_shopify_webhook_unknown_brand_rejected(client):
 @pytest.mark.asyncio
 async def test_shopify_webhook_resolves_secret_from_secret_manager(client, db_engine):
     from app.services.secrets import SecretManagerClient
-    secrets_client = SecretManagerClient()
+    secrets_client = SecretManagerClient(tenant_id="tenant-webhook-test", project_id="tenant-webhook-gcp")
     
     # 1. Write the secret token value to Secret Manager mock registry
     secret_id = "tenant-webhook-test-brand-shopify-test-shopify-secret"
@@ -192,7 +199,7 @@ async def test_shopify_webhook_uses_tenant_gcp_project_for_secrets(client, db_en
     dedicated_project = "tenant-dedicated-project-xyz"
     secret_id = "tenant-webhook-test-brand-shopify-test-shopify-secret"
     
-    secrets_client = SecretManagerClient(project_id=dedicated_project)
+    secrets_client = SecretManagerClient(tenant_id="tenant-webhook-test", project_id=dedicated_project)
     credential = await secrets_client.write_secret(secret_id, "dedicated-mcp-key-999")
     
     async with async_session() as s:
@@ -229,7 +236,7 @@ async def test_shopify_webhook_uses_tenant_gcp_project_for_secrets(client, db_en
 @pytest.mark.asyncio
 async def test_shopify_webhook_deduplicated(client):
     from app.services.secrets import SecretManagerClient
-    await SecretManagerClient().write_secret("shopify-secret-key-123", "shopify-secret-key-123")
+    await SecretManagerClient(tenant_id="tenant-webhook-test", project_id="tenant-webhook-gcp").write_secret("shopify-secret-key-123", "shopify-secret-key-123")
 
     payload = b'{"id": 554433, "total_price": "49.99"}'
     signature = _generate_shopify_signature(payload, "shopify-secret-key-123")

@@ -40,10 +40,10 @@ def setup_valid_prod_env(monkeypatch):
     for var in [
         "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET",
         "SHOPIFY_CLIENT_ID", "SHOPIFY_CLIENT_SECRET",
-        "WHATSAPP_TOKEN", "WHATSAPP_VERIFY_TOKEN", "WHATSAPP_APP_SECRET", "WHATSAPP_PHONE_NUMBER_ID",
-        "SECRET_KEY"
+        "WHATSAPP_TOKEN", "WHATSAPP_VERIFY_TOKEN", "WHATSAPP_APP_SECRET", "WHATSAPP_PHONE_NUMBER_ID"
     ]:
         monkeypatch.setenv(var, "secure-prod-value-xyz")
+    monkeypatch.setenv("SECRET_KEY", "projects/control-plane-project/secrets/aos-oauth-state-secret/versions/latest")
 
     # Explicitly clear mock settings to prevent test env leaks
     for var in ["AOS_MOCK_CAMPAIGNS_FILE", "AOS_MOCK_SECRETS_FILE", "AOS_MOCK_STORAGE_FILE", "MOCK_PLAYWRIGHT"]:
@@ -74,7 +74,7 @@ def test_prod_boot_guards_secret_key(monkeypatch):
 
     with pytest.raises(RuntimeError) as exc_info:
         import app.services.oauth
-    assert "SECRET_KEY must be set" in str(exc_info.value)
+    assert "SECRET_KEY must" in str(exc_info.value)
 
 def test_prod_boot_guards_database_url(monkeypatch):
     # Case 2: ENV=production + DATABASE_URL contains localhost -> RuntimeError

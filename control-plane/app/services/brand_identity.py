@@ -73,7 +73,18 @@ async def bootstrap_brand_identity(db_session: AsyncSession, tenant_id: str, bra
             "target_persona": "General e-commerce consumers",
             "past_experience": "No performance logs recorded yet."
         }
-        
+
+    if isinstance(identity_data, str):
+        try:
+            identity_data = json.loads(identity_data)
+        except Exception as e:
+            logger.error(f"Failed to parse identity JSON: {e}")
+            identity_data = {
+                "tone_of_voice": "Friendly, modern, and direct",
+                "target_persona": "General e-commerce consumers",
+                "past_experience": "No performance logs recorded yet."
+            }
+
     # D. Write the RAG profile directly to the database
     # Clean up any existing brand_identity entries
     stmt_cleanup = delete(BrandProperty).where(

@@ -4,6 +4,7 @@ import json
 import pytest
 from unittest.mock import patch, AsyncMock, MagicMock
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker
 from httpx import AsyncClient, HTTPStatusError
 from fastapi import HTTPException, Request
 
@@ -38,7 +39,7 @@ async def test_oauth_refresh_service_success(session, mock_secrets_client):
         }
         mock_post.return_value = mock_resp
 
-        service = OauthService()
+        service = OauthService(tenant_id="t1")
         result = await service.refresh_token(
             tenant_id="t1",
             brand_id="b1",
@@ -73,7 +74,7 @@ async def test_oauth_refresh_service_revoked_token(session, mock_secrets_client)
         mock_resp.json.return_value = {"error": "invalid_grant", "error_description": "Token has been expired or revoked."}
         mock_post.return_value = mock_resp
 
-        service = OauthService()
+        service = OauthService(tenant_id="t1")
         with pytest.raises(Exception):
             await service.refresh_token(
                 tenant_id="t1",
@@ -142,22 +143,47 @@ async def test_refresh_tokens_task_endpoint_empty_db(client):
 # Tier 2: OAuth Security and State Handlers
 # ---------------------------------------------------------
 
-def test_oauth_state_signing_integrity():
+@pytest.mark.parametrize(
+    "invalid_key",
+    [
+        "projects/control-plane/secrets/oauth-key/versions/latest",
+        "projects/tenant-a/secrets/oauth-key/versions/1",
+        "oauth-state-signing-secret",
+        "short-key",
+        b"short",
+        "",
+        b"",
+    ],
+)
+def test_oauth_signer_rejects_secret_references_and_invalid_keys(invalid_key):
+    """Verify that OAuthStateSigner strictly rejects literal references, strings, and short keys."""
+    from app.services.oauth import OAuthStateSigner
+    with pytest.raises(
+        ValueError,
+        match="Literal secret references cannot be used",
+    ):
+        OAuthStateSigner(signing_key=invalid_key)
+
+
+@pytest.mark.asyncio
+async def test_oauth_state_signing_integrity():
     """Test 21: Verify that generated OAuth state contains a cryptographically secure signature."""
     try:
-        from app.services.oauth import generate_oauth_state, verify_oauth_state
+        from app.services.oauth import OAuthStateSigner
     except ImportError:
         pytest.skip("State signing functions not implemented yet (expected Red state)")
 
     tenant_id = "t1"
     brand_id = "b1"
     redirect_uri = "https://app.agencyos.com/callback"
+    signing_key = b"unit-test-signing-key-with-at-least-32-bytes!!"
     
-    state = generate_oauth_state(tenant_id, brand_id, redirect_uri)
+    signer = OAuthStateSigner(signing_key=signing_key)
+    state = signer.generate_state(tenant_id, brand_id, redirect_uri)
     assert state is not None
     
     # Valid verification
-    payload = verify_oauth_state(state)
+    payload = signer.verify_state(state)
     assert payload["tenant_id"] == tenant_id
     assert payload["brand_id"] == brand_id
     assert payload["redirect_uri"] == redirect_uri
@@ -165,27 +191,31 @@ def test_oauth_state_signing_integrity():
     # Invalid signature
     tampered_state = state[:-5] + "aaaaa"
     with pytest.raises(ValueError, match="Invalid state signature"):
-        verify_oauth_state(tampered_state)
+        signer.verify_state(tampered_state)
 
-def test_oauth_state_expiration():
+
+@pytest.mark.asyncio
+async def test_oauth_state_expiration():
     """Test 22: Verify that OAuth state tokens expire after a predefined duration (15 mins)."""
     try:
-        from app.services.oauth import generate_oauth_state, verify_oauth_state
+        from app.services.oauth import OAuthStateSigner
     except ImportError:
         pytest.skip("State signing functions not implemented yet (expected Red state)")
 
-    state = generate_oauth_state("t1", "b1", "https://app.agencyos.com/callback")
+    signing_key = b"unit-test-signing-key-with-at-least-32-bytes!!"
+    signer = OAuthStateSigner(signing_key=signing_key)
+    state = signer.generate_state("t1", "b1", "https://app.agencyos.com/callback")
     
     # Verify immediately succeeds
-    assert verify_oauth_state(state) is not None
+    assert signer.verify_state(state) is not None
 
     # Fast forward time by 16 minutes
     future_time = dt.datetime.utcnow() + dt.timedelta(minutes=16)
     with patch("datetime.datetime") as mock_dt:
         mock_dt.utcnow.return_value = future_time
-        # Re-mocking timezone-aware utcnow if needed, otherwise standard
         with pytest.raises(ValueError, match="State token expired"):
-            verify_oauth_state(state)
+            signer.verify_state(state)
+
 
 def test_open_redirect_helper_validation():
     """Test 23: Verify that redirect URI helper rejects domains outside the allowed pattern."""
@@ -203,9 +233,14 @@ def test_open_redirect_helper_validation():
     assert validate_redirect_uri("https://app.agencyos.com.attacker.com/bypass") is False
     assert validate_redirect_uri("https://attacker.com/app.agencyos.com") is False
 
+
 @pytest.mark.asyncio
-async def test_oauth_authorize_redirect_generation(client):
+async def test_oauth_authorize_redirect_generation(client, session):
     """Test 24: Verify authorize endpoint generates a valid provider redirect URI with signed state."""
+    session.add(Tenant(id="t1", name="Test Tenant", hosting_tier="shared"))
+    session.add(Brand(id="b1", tenant_id="t1", name="Test Brand"))
+    await session.commit()
+
     resp = await client.get(
         "/connections/oauth/authorize?provider=shopify&brand_id=b1&redirect_uri=https://app.agencyos.com/callback",
         headers={"X-Tenant-ID": "t1"}
@@ -219,6 +254,7 @@ async def test_oauth_authorize_redirect_generation(client):
     assert "state=" in location
     assert "redirect_uri=" in location
 
+
 @pytest.mark.asyncio
 async def test_oauth_callback_missing_state(client):
     """Test 25: Verify callback endpoint rejects requests missing state parameter."""
@@ -228,6 +264,7 @@ async def test_oauth_callback_missing_state(client):
     assert resp.status_code == 400
     assert "Missing state" in resp.text
 
+
 # ---------------------------------------------------------
 # Tier 2: Token Rotation and Scheduler Resiliency
 # ---------------------------------------------------------
@@ -235,14 +272,17 @@ async def test_oauth_callback_missing_state(client):
 @pytest.mark.asyncio
 async def test_periodic_token_rotation_flow(session, mock_secrets_client):
     """Test 36: Verify periodic task identifies expiring tokens and rotates them."""
-    # Seed a connection with an expiring token (e.g. last_rotated_at is old)
+    tenant = Tenant(id="t1", name="Test Tenant", gcp_project="tenant-a-secrets")
+    session.add(tenant)
+    brand = Brand(id="b1", tenant_id="t1", name="Test Brand")
+    session.add(brand)
+    # Seed a connection with an expiring token
     conn = Connection(
         tenant_id="t1", brand_id="b1", provider="google-ads",
-        credential="projects/test-project/secrets/ads-secret/versions/1",
+        credential="projects/tenant-a-secrets/secrets/ads-secret/versions/1",
         config={"refresh_token": "rt-123"},
         status="active"
     )
-    # Mocking rotation interval check if stored in a last_rotated_at column
     if hasattr(Connection, "last_rotated_at"):
         conn.last_rotated_at = dt.datetime.utcnow() - dt.timedelta(days=10)
     
@@ -286,18 +326,23 @@ async def test_periodic_token_rotation_flow(session, mock_secrets_client):
         await session.refresh(conn)
         assert conn.status == "active"
 
+
 @pytest.mark.asyncio
 async def test_scheduler_batch_resiliency(session, mock_secrets_client):
     """Test 37: Verify failure in one connection's rotation does not abort the entire batch."""
+    tenant = Tenant(id="t1", name="Test Tenant", gcp_project="tenant-a-secrets")
+    session.add(tenant)
+    brand = Brand(id="b1", tenant_id="t1", name="Test Brand")
+    session.add(brand)
     conn1 = Connection(
         tenant_id="t1", brand_id="b1", provider="shopify",
-        credential="projects/test-project/secrets/shopify-secret/versions/1",
+        credential="projects/tenant-a-secrets/secrets/shopify-secret/versions/1",
         status="active",
         config={"refresh_token": "rt-shopify"}
     )
     conn2 = Connection(
         tenant_id="t1", brand_id="b1", provider="google-ads",
-        credential="projects/test-project/secrets/ads-secret/versions/1",
+        credential="projects/tenant-a-secrets/secrets/ads-secret/versions/1",
         status="active",
         config={"refresh_token": "rt-ads"}
     )
@@ -314,15 +359,15 @@ async def test_scheduler_batch_resiliency(session, mock_secrets_client):
 
     # Mock rotation to fail for conn1 and succeed for conn2
     async def mock_rotate(*args, **kwargs):
-        provider = kwargs.get("provider")
+        provider = kwargs.get("provider") or (args[2] if len(args) > 2 else (args[0] if len(args) == 1 else None))
         if provider == "shopify":
             raise Exception("Shopify rotation failed!")
         return {
             "access_token": "new-access",
             "refresh_token": "new-refresh",
             "expires_in": 3600,
-            "access_token_ref": "projects/test-project/secrets/ads-access/versions/latest",
-            "refresh_token_ref": "projects/test-project/secrets/ads-refresh/versions/latest"
+            "access_token_ref": "projects/tenant-a-secrets/secrets/ads-access/versions/latest",
+            "refresh_token_ref": "projects/tenant-a-secrets/secrets/ads-refresh/versions/latest"
         }
 
     with patch("app.services.oauth.OauthService.refresh_token", side_effect=mock_rotate):
@@ -354,14 +399,16 @@ async def test_scheduler_batch_resiliency(session, mock_secrets_client):
         assert conn1.status == "error"
         assert conn2.status == "active"
 
+
 @pytest.mark.asyncio
 async def test_scheduler_auth_enforcement(client):
     """Test 38: Verify that worker task endpoints return 401 unauthorized if no OIDC header is passed."""
     # Ensure WORKER_SA is configured to force verification
     with patch("app.auth.WORKER_SA", "scheduler-worker@aos.iam.gserviceaccount.com"), \
-         patch("app.auth.AOS_ENV", "production"):
+          patch("app.auth.AOS_ENV", "production"):
         resp = await client.post("/tasks/drain-outbox")
         assert resp.status_code == 401
+
 
 @pytest.mark.asyncio
 async def test_auto_refresh_retries_during_audits(session, mock_secrets_client):
@@ -371,9 +418,13 @@ async def test_auto_refresh_retries_during_audits(session, mock_secrets_client):
     except ImportError:
         pytest.skip("OauthService not implemented yet (expected Red state)")
 
+    tenant = Tenant(id="t1", name="Test Tenant", gcp_project="tenant-a-secrets")
+    session.add(tenant)
+    brand = Brand(id="b1", tenant_id="t1", name="Test Brand")
+    session.add(brand)
     conn = Connection(
         tenant_id="t1", brand_id="b1", provider="google-search-console",
-        credential="projects/test-project/secrets/sc-secret/versions/1", status="active"
+        credential="projects/tenant-a-secrets/secrets/sc-secret/versions/1", status="active"
     )
     session.add(conn)
     await session.commit()
@@ -382,7 +433,7 @@ async def test_auto_refresh_retries_during_audits(session, mock_secrets_client):
 
     # Spy on refresh_token
     with patch("app.services.oauth.OauthService.refresh_token") as mock_refresh, \
-         patch("httpx.AsyncClient.send") as mock_send:
+          patch("httpx.AsyncClient.post") as mock_post:
         
         mock_refresh.return_value = {"access_token": "fresh-token", "refresh_token": "fresh-refresh"}
         
@@ -391,27 +442,29 @@ async def test_auto_refresh_retries_during_audits(session, mock_secrets_client):
         resp1.status_code = 401
         resp2 = MagicMock()
         resp2.status_code = 200
-        resp2.json.return_value = {"rows": []}
-        mock_send.side_effect = [resp1, resp2]
+        resp2.json.return_value = {"inspectionResult": {"indexStatusResult": {"verdict": "PASS"}}}
+        mock_post.side_effect = [resp1, resp2]
 
         from app.services.google_audit import GoogleSearchConsoleAudit
         audit = GoogleSearchConsoleAudit(tenant_id="t1", brand_id="b1", session=session)
-        # Run audit
-        try:
-            await audit.run()
-        except Exception:
-            # If the audit runner is not set up to auto-retry yet, it might raise an exception
-            pass
+        
+        result = await audit.run()
+        assert result["status"] == "healthy"
             
         # Assert that refresh_token was triggered automatically on 401
         mock_refresh.assert_called_once()
 
+
 @pytest.mark.asyncio
 async def test_db_session_rollback_on_rotation_db_failure(session, mock_secrets_client):
     """Test 40: Verify database rollback on rotation database write failure."""
+    tenant = Tenant(id="t1", name="Test Tenant", gcp_project="tenant-a-secrets")
+    session.add(tenant)
+    brand = Brand(id="b1", tenant_id="t1", name="Test Brand")
+    session.add(brand)
     conn = Connection(
         tenant_id="t1", brand_id="b1", provider="shopify",
-        credential="projects/test-project/secrets/s1/versions/1", status="active"
+        credential="projects/tenant-a-secrets/secrets/s1/versions/1", status="active"
     )
     session.add(conn)
     await session.commit()
@@ -423,7 +476,7 @@ async def test_db_session_rollback_on_rotation_db_failure(session, mock_secrets_
 
     # Simulate database crash during rotation update
     with patch("app.services.oauth.OauthService.refresh_token") as mock_refresh, \
-         patch.object(session, "commit", side_effect=Exception("Database connection lost!")):
+          patch.object(session, "commit", side_effect=Exception("Database connection lost!")):
         
         mock_refresh.return_value = {"access_token": "new-access", "refresh_token": "new-refresh"}
         
@@ -446,7 +499,7 @@ async def test_rotation_prunes_old_versions(session, mock_secrets_client):
 
     # We don't reassign the mock attribute, as it is already patched on SecretManagerClient in conftest
     
-    service = OauthService()
+    service = OauthService(tenant_id="t1")
     # Mocking internal prune logic if implemented, or call it directly
     if hasattr(service, "prune_old_versions"):
         await service.prune_old_versions("projects/test-project/secrets/s1/versions/2")
@@ -483,6 +536,10 @@ async def test_complete_oauth_flow(mock_llm_cls, client, session, mock_secrets_c
         return json.dumps(gemini_identity_response)
     mock_llm.generate_personalized_content.side_effect = mock_generate
     mock_llm_cls.return_value = mock_llm
+
+    session.add(Tenant(id="t1", name="Test Tenant", hosting_tier="shared"))
+    session.add(Brand(id="b1", tenant_id="t1", name="Test Brand"))
+    await session.commit()
 
     # Step 1: GET /connections/oauth/authorize
     auth_resp = await client.get(
@@ -528,49 +585,55 @@ async def test_complete_oauth_flow(mock_llm_cls, client, session, mock_secrets_c
         assert callback_resp.status_code == 302
         assert callback_resp.headers.get("location") == "https://app.agencyos.com/callback"
         
-        # The callback proposes the Op. Query it!
+        # The callback proposes the Op. Query and process it using a fresh session.
         from app.models import OpRow
         from app.kernel import loop
         
-        stmt_op = select(OpRow).where(OpRow.action == "manage.shopify.connect")
-        res_op = await session.execute(stmt_op)
-        op_row = res_op.scalar_one()
-        assert op_row.state == "AWAITING_APPROVAL"
-        
-        # Approve the Op
-        await loop.decide(session, op_row, decision="approve", actor="operator", role="OPERATOR", surface="whatsapp")
-        await session.commit()
-        
-        # Execute the Op
-        await loop._execute_and_verify(session, op_row)
-        await session.commit()
-        
-        # Check Connection record created and is active
-        stmt = select(Connection).where(Connection.tenant_id == "t1", Connection.provider == "shopify")
-        res = await session.execute(stmt)
-        conn = res.scalar_one()
-        assert conn.status == "active"
-        assert conn.credential is not None
+        fresh_maker = async_sessionmaker(session.bind, expire_on_commit=False)
+        async with fresh_maker() as fresh_s:
+            stmt_op = select(OpRow).where(OpRow.action == "manage.shopify.connect")
+            res_op = await fresh_s.execute(stmt_op)
+            op_row = res_op.scalar_one()
+            assert op_row.state == "AWAITING_APPROVAL"
+            
+            # Approve the Op
+            await loop.decide(fresh_s, op_row, decision="approve", actor="operator", role="OPERATOR", surface="whatsapp")
+            await fresh_s.commit()
+            
+            # Execute the Op
+            await loop._execute_and_verify(fresh_s, op_row)
+            await fresh_s.commit()
+            
+            # Check Connection record created and is active
+            stmt = select(Connection).where(Connection.tenant_id == "t1", Connection.provider == "shopify")
+            res = await fresh_s.execute(stmt)
+            conn = res.scalar_one()
+            assert conn.status == "active"
+            assert conn.credential is not None
 
-        # Check BrandProperty (brand_identity) was created
-        stmt_prop = select(BrandProperty).where(
-            BrandProperty.tenant_id == "t1",
-            BrandProperty.brand_id == "b1",
-            BrandProperty.type == "brand_identity"
-        )
-        res_prop = await session.execute(stmt_prop)
-        bp = res_prop.scalar_one_or_none()
-        assert bp is not None
-        assert bp.status == "active"
-        assert bp.findings["tone_of_voice"] == "Empathetic, sensory-friendly, clinical"
+            # Check BrandProperty (brand_identity) was created
+            stmt_prop = select(BrandProperty).where(
+                BrandProperty.tenant_id == "t1",
+                BrandProperty.brand_id == "b1",
+                BrandProperty.type == "brand_identity"
+            )
+            res_prop = await fresh_s.execute(stmt_prop)
+            bp = res_prop.scalar_one_or_none()
+            assert bp is not None
+            assert bp.status == "active"
+            assert bp.findings["tone_of_voice"] == "Empathetic, sensory-friendly, clinical"
 
 @pytest.mark.asyncio
-async def test_callback_code_exchange_failure(client, session):
+async def test_callback_code_exchange_failure(client, session, mock_secrets_client):
     """Test 49: Verify callback handles token exchange failure gracefully, showing error page."""
+    session.add(Tenant(id="t1", name="Test Tenant", hosting_tier="shared"))
+    session.add(Brand(id="b1", tenant_id="t1", name="Test Brand"))
+    await session.commit()
+
     # Step 1: Generate a valid state
     try:
         from app.services.oauth import generate_oauth_state
-        state = generate_oauth_state("t1", "b1", "https://app.agencyos.com/callback")
+        state = await generate_oauth_state("t1", "b1", "https://app.agencyos.com/callback")
     except ImportError:
         pytest.skip("State signing functions not implemented yet (expected Red state)")
 
@@ -589,12 +652,17 @@ async def test_callback_code_exchange_failure(client, session):
         assert "Authorization code expired" in resp.text
 
 @pytest.mark.asyncio
-async def test_cross_tenant_session_attack(client, session):
+async def test_cross_tenant_session_attack(client, session, mock_secrets_client):
     """Test 50: Verify that state tokens generated for tenant A cannot be used by tenant B (state hijacking protection)."""
+    session.add(Tenant(id="tenant-A", name="Tenant A", hosting_tier="shared"))
+    session.add(Tenant(id="tenant-B", name="Tenant B", hosting_tier="shared"))
+    session.add(Brand(id="b1", tenant_id="tenant-A", name="Brand A"))
+    await session.commit()
+
     try:
         from app.services.oauth import generate_oauth_state
         # Generate state for tenant A
-        state_tenant_A = generate_oauth_state("tenant-A", "b1", "https://app.agencyos.com/callback")
+        state_tenant_A = await generate_oauth_state("tenant-A", "b1", "https://app.agencyos.com/callback")
     except ImportError:
         pytest.skip("State signing functions not implemented yet (expected Red state)")
 
@@ -612,11 +680,15 @@ async def test_cross_tenant_session_attack(client, session):
     assert "Tenant mismatch" in resp.text or "state" in resp.text.lower()
 
 @pytest.mark.asyncio
-async def test_connection_scope_verification(client, session):
+async def test_connection_scope_verification(client, session, mock_secrets_client):
     """Test 51: Verify callback rejects token exchanges that don't return all required scopes."""
+    session.add(Tenant(id="t1", name="Test Tenant", hosting_tier="shared"))
+    session.add(Brand(id="b1", tenant_id="t1", name="Test Brand"))
+    await session.commit()
+
     try:
         from app.services.oauth import generate_oauth_state
-        state = generate_oauth_state("t1", "b1", "https://app.agencyos.com/callback")
+        state = await generate_oauth_state("t1", "b1", "https://app.agencyos.com/callback")
     except ImportError:
         pytest.skip("State signing functions not implemented yet (expected Red state)")
 
@@ -697,3 +769,75 @@ async def test_callback_provider_denial_clean_failure(client):
     assert resp.status_code == 400
     assert "access_denied" in resp.text
     assert "User denied access" in resp.text
+
+
+# ---------------------------------------------------------
+# Security Invariant and Fail-Closed Regression Suite
+# ---------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_rotation_fails_closed_without_tenant_secret_project(session):
+    """Verify token rotation fails closed when tenant configuration is missing."""
+    tenant = Tenant(id="t-no-config", name="No Config Tenant", gcp_project=None)
+    session.add(tenant)
+    brand = Brand(id="b-no-config", tenant_id="t-no-config", name="Brand")
+    session.add(brand)
+    conn = Connection(
+        tenant_id="t-no-config", brand_id="b-no-config", provider="shopify",
+        credential="projects/test/secrets/s1/versions/1", status="active",
+        config={"refresh_token": "rt"}
+    )
+    session.add(conn)
+    await session.commit()
+
+    from app.adapters.manage import ManageAdapter
+    from app.kernel.optypes import OpSpec, Severity, Reversibility
+    adapter = ManageAdapter()
+    spec = OpSpec(
+        tenant_id="t-no-config",
+        brand_id="b-no-config",
+        domain="manage",
+        action="manage.connection.rotate",
+        params={"provider": "shopify"},
+        severity=Severity(impact=1, reversibility=Reversibility.COMPENSATABLE)
+    )
+    res = await adapter.execute(spec, idem_key="idem-no-config", session=session)
+    assert res.ok is False
+
+
+@pytest.mark.asyncio
+async def test_rotation_does_not_fall_back_to_control_plane_project():
+    """Verify tenant SecretManagerClient strictly preserves tenant GCP project isolation."""
+    from app.services.secrets import SecretManagerClient
+    client = SecretManagerClient(tenant_id="tenant-alpha", project_id="tenant-alpha-gcp")
+    assert client.project_id == "tenant-alpha-gcp"
+    assert client.tenant_id == "tenant-alpha"
+    assert client.project_id != "aos-control-plane"
+
+
+@pytest.mark.asyncio
+async def test_audit_error_classification_no_refresh_on_403(session, mock_secrets_client):
+    """Verify provider 403 Forbidden does NOT trigger an automatic refresh loop."""
+    tenant = Tenant(id="t1", name="Test Tenant", gcp_project="tenant-a-secrets")
+    session.add(tenant)
+    brand = Brand(id="b1", tenant_id="t1", name="Test Brand")
+    session.add(brand)
+    conn = Connection(
+        tenant_id="t1", brand_id="b1", provider="google-search-console",
+        credential="projects/tenant-a-secrets/secrets/sc-secret/versions/1", status="active"
+    )
+    session.add(conn)
+    await session.commit()
+
+    with patch("app.services.oauth.OauthService.refresh_token") as mock_refresh, \
+         patch("httpx.AsyncClient.post") as mock_post:
+        resp = MagicMock()
+        resp.status_code = 403
+        resp.text = "Forbidden: Insufficient permissions"
+        mock_post.return_value = resp
+
+        from app.services.google_audit import GoogleSearchConsoleAudit
+        audit = GoogleSearchConsoleAudit(tenant_id="t1", brand_id="b1", session=session)
+        with pytest.raises(Exception):
+            await audit.run()
+        mock_refresh.assert_not_called()
