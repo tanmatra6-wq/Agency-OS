@@ -193,7 +193,7 @@ describe("Home Onboarding Page", () => {
   });
 
   it("submits the form to /tenants and transitions to onboarded", async () => {
-    mockRequest.mockImplementation((path: string, method?: string, body?: any) => {
+    mockRequest.mockImplementation((path: string, method?: string, _body?: unknown) => {
       if (path === "/readyz" && method === "get") {
         return Promise.resolve({ status: "ready", onboarded: false });
       }
