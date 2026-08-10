@@ -276,3 +276,48 @@ async def test_postgres_rls_coverage_missing_policy_negative():
         with pytest.raises(AssertionError) as exc_info:
             await test_postgres_rls_coverage(None)
         assert "Table 'brands' is missing the 'worker_bypass' policy" in str(exc_info.value)
+
+
+def test_rls_bypass_import_guardrails():
+    """Verify that only explicitly permitted modules are allowed to import RLS-bypass database sessions."""
+    import ast
+    import pathlib
+
+    allowed_files = {
+        "app/database.py",
+        "app/main.py",
+        "app/routers/webhooks.py",
+        "app/routers/oauth.py",
+        "app/routers/tenants.py",
+        "app/routers/tasks.py",
+    }
+    
+    app_root = pathlib.Path(__file__).parent.parent / "app"
+    violations = []
+    
+    for path in app_root.rglob("*.py"):
+        rel_path = path.relative_to(app_root.parent).as_posix()
+        
+        if rel_path.startswith("app/tasks/"):
+            continue
+            
+        if rel_path in allowed_files:
+            continue
+            
+        with open(path, "r", encoding="utf-8") as f:
+            try:
+                tree = ast.parse(f.read(), filename=rel_path)
+            except SyntaxError:
+                continue
+                
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                if node.module in ("app.database", "database"):
+                    for alias in node.names:
+                        if alias.name in ("get_worker_db", "WorkerAsyncSessionLocal"):
+                            violations.append(f"{rel_path}:{node.lineno} -> imports {alias.name}")
+            elif isinstance(node, ast.Attribute):
+                if node.attr in ("get_worker_db", "WorkerAsyncSessionLocal"):
+                    violations.append(f"{rel_path}:{node.lineno} -> references attribute {node.attr}")
+                        
+    assert not violations, f"Modules violating RLS-bypass import guardrails:\n" + "\n".join(violations)

@@ -87,7 +87,7 @@ async def test_governed_tenant_offboard_flow(client: AsyncClient, session: Async
     """
     # Mock send_whatsapp_card_task to prevent network calls
     from unittest.mock import AsyncMock
-    monkeypatch.setattr("app.main.send_whatsapp_card_task", AsyncMock())
+    monkeypatch.setattr("app.routers.tenants.send_whatsapp_card_task", AsyncMock())
 
     # 1. Create Tenant and some audit/trace rows
     t = Tenant(id="t-offboard-test", name="Offboard Inc", is_active=True)

@@ -1,5 +1,6 @@
 import pytest
 import os
+import app.main
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.kernel.optypes import OpSpec, Severity, Reversibility, OpState
@@ -96,7 +97,7 @@ async def test_grow_capi_and_budget_reallocation_saga(grow_adapter, session: Asy
     await session.commit()
     
     # 4. Act: Trigger /tasks/evaluate-trust task logic
-    from app.main import evaluate_trust
+    from app.routers.tasks import evaluate_trust
     res = await evaluate_trust(s=session)
     assert res["status"] == "ok"
     

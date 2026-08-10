@@ -48,7 +48,7 @@ class GoogleAuditClient:
             try:
                 from app.services.oauth import OauthService
                 logger.info(f"Attempting token refresh via OauthService for tenant={tenant_id}, provider={provider}")
-                service = OauthService()
+                service = OauthService(tenant_id=tenant_id)
                 res = await service.refresh_token(tenant_id, brand_id, provider, credential_ref)
                 new_token = res.get("access_token")
                 if new_token:
@@ -281,7 +281,13 @@ class GoogleSearchConsoleAudit:
             raise ValueError(f"No active google-search-console connection found for brand {self.brand_id}")
 
         # 2. Resolve token from Secret Manager
-        secrets_client = SecretManagerClient()
+        from app.models import Tenant
+        stmt_tenant = select(Tenant).where(Tenant.id == self.tenant_id)
+        res_tenant = await self.session.execute(stmt_tenant)
+        tenant = res_tenant.scalar_one_or_none()
+        gcp_project = tenant.gcp_project if tenant else None
+
+        secrets_client = SecretManagerClient(tenant_id=self.tenant_id, project_id=gcp_project)
         token = await secrets_client.read_secret(conn.credential)
 
         # 3. Setup client config, including metadata for OauthService refresh

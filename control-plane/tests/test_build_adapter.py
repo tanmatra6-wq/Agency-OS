@@ -36,7 +36,22 @@ def test_build_adapter_plan(adapter):
     assert op.params["intent"] == "change hero color to blue"
     assert "branch_name" in op.params
     assert op.params["repo"] is None
-    assert op.cost_estimate.amount_minor == 1000
+    assert op.cost_estimate.amount_minor == 100000  # Default is ₹1000.00 (100000 paise)
+
+def test_build_adapter_plan_with_capability(adapter):
+    # Match email_template_builder (200000 paise)
+    ops = adapter.plan("create welcome email series for ecommerce", "t1", "b1")
+    assert len(ops) == 1
+    op = ops[0]
+    assert op.action == "build.deliver"
+    assert op.params["capability"] == "email_template_builder"
+    assert op.cost_estimate.amount_minor == 200000  # ₹2000.00
+    
+    # Match seo_auditor_fixer (100000 paise)
+    ops2 = adapter.plan("optimize for seo", "t1", "b1")
+    assert len(ops2) == 1
+    assert ops2[0].params["capability"] == "seo_auditor_fixer"
+    assert ops2[0].cost_estimate.amount_minor == 100000  # ₹1000.00
 
 def test_build_adapter_preview(adapter, build_op):
     preview_art = adapter.preview(build_op)
@@ -144,3 +159,202 @@ async def test_build_adapter_rollback_execution(adapter, build_op, temp_git_remo
         assert "color=\"blue\"" not in content
     finally:
         shutil.rmtree(temp_dir)
+
+def test_build_adapter_load_profile(adapter):
+    # Test valid profile loading and frontmatter stripping
+    profile_content = adapter._load_profile("email_template_builder")
+    assert profile_content is not None
+    assert "Frontend Developer" in profile_content
+    assert "---" not in profile_content[:10]
+    
+    # Test invalid profile
+    assert adapter._load_profile("non_existent_capability") is None
+    assert adapter._load_profile(None) is None
+
+from unittest.mock import patch
+
+def test_build_adapter_preview_security_passed(adapter, build_op):
+    preview_art = adapter.preview(build_op)
+    assert preview_art.kind == "build_preview"
+    assert "✅ AppSec Review: PASSED" in preview_art.summary
+    assert "security_review" in build_op.params
+    assert build_op.params["security_review"]["passed"] is True
+    assert build_op.params["security_review"]["risk_score"] == 1
+
+def test_build_adapter_preview_security_failed_credentials(adapter, temp_git_remote):
+    with patch("app.services.llm.VertexAIClient.generate_edits") as mock_gen:
+        mock_gen.return_value = {
+            "explanation": "Adding credentials",
+            "edits": [
+                {
+                    "path": "src/App.js",
+                    "action": "modify",
+                    "content": "const AWS_SECRET_ACCESS_KEY = 'vulnerable_secret';"
+                }
+            ]
+        }
+        
+        fail_op = OpSpec(
+            id="op_build_sec_fail",
+            tenant_id="t1",
+            brand_id="b1",
+            domain="build",
+            action="build.deliver",
+            params={
+                "intent": "leak keys",
+                "branch_name": "aos-build-sec-fail",
+                "repo": temp_git_remote
+            },
+            severity=Severity(impact=2, reversibility=Reversibility.REVERSIBLE),
+            cost_estimate=Money(amount_minor=1000, currency="INR"),
+        )
+        
+        preview_art = adapter.preview(fail_op)
+        assert preview_art.kind == "build_preview"
+        assert "⚠️ AppSec Review: FAILED" in preview_art.summary
+        assert "Found hardcoded AWS_SECRET_ACCESS_KEY" in preview_art.summary
+        assert fail_op.params["security_review"]["passed"] is False
+        assert fail_op.params["security_review"]["risk_score"] == 5
+
+def test_build_adapter_preview_security_failed_eval(adapter, temp_git_remote):
+    with patch("app.services.llm.VertexAIClient.generate_edits") as mock_gen:
+        mock_gen.return_value = {
+            "explanation": "Using eval",
+            "edits": [
+                {
+                    "path": "src/App.js",
+                    "action": "modify",
+                    "content": "eval(untrusted_code);"
+                }
+            ]
+        }
+        
+        fail_op = OpSpec(
+            id="op_build_sec_eval",
+            tenant_id="t1",
+            brand_id="b1",
+            domain="build",
+            action="build.deliver",
+            params={
+                "intent": "use eval",
+                "branch_name": "aos-build-sec-eval",
+                "repo": temp_git_remote
+            },
+            severity=Severity(impact=2, reversibility=Reversibility.REVERSIBLE),
+            cost_estimate=Money(amount_minor=1000, currency="INR"),
+        )
+        
+        preview_art = adapter.preview(fail_op)
+        assert "⚠️ AppSec Review: FAILED" in preview_art.summary
+        assert "Found eval() usage in javascript" in preview_art.summary
+        assert fail_op.params["security_review"]["passed"] is False
+        assert fail_op.params["security_review"]["risk_score"] == 4
+
+def test_build_adapter_preview_design_passed(adapter, build_op):
+    preview_art = adapter.preview(build_op)
+    assert preview_art.kind == "build_preview"
+    assert "✅ Brand Guardian Review: PASSED" in preview_art.summary
+    assert "design_review" in build_op.params
+    assert build_op.params["design_review"]["passed"] is True
+    assert build_op.params["design_review"]["score"] == 5
+
+def test_build_adapter_preview_design_failed_color(adapter, temp_git_remote):
+    with patch("app.services.llm.VertexAIClient.generate_edits") as mock_gen:
+        mock_gen.return_value = {
+            "explanation": "Changing button to pink",
+            "edits": [
+                {
+                    "path": "src/App.js",
+                    "action": "modify",
+                    "content": "const Button = () => <button color='pink'>Click</button>;"
+                }
+            ]
+        }
+        
+        fail_op = OpSpec(
+            id="op_build_design_fail",
+            tenant_id="t1",
+            brand_id="b1",
+            domain="build",
+            action="build.deliver",
+            params={
+                "intent": "make it pink",
+                "branch_name": "aos-build-design-fail",
+                "repo": temp_git_remote
+            },
+            severity=Severity(impact=2, reversibility=Reversibility.REVERSIBLE),
+            cost_estimate=Money(amount_minor=1000, currency="INR"),
+        )
+        
+        preview_art = adapter.preview(fail_op)
+        assert preview_art.kind == "build_preview"
+        assert "⚠️ Brand Guardian Review: FAILED" in preview_art.summary
+        assert "Brand colors only permit primary blue" in preview_art.summary
+        assert fail_op.params["design_review"]["passed"] is False
+        assert fail_op.params["design_review"]["score"] == 2
+
+def test_build_adapter_preview_design_non_visual_skipped(adapter, temp_git_remote):
+    with patch("app.services.llm.VertexAIClient.generate_edits") as mock_gen:
+        mock_gen.return_value = {
+            "explanation": "Update backend service",
+            "edits": [
+                {
+                    "path": "backend/main.py",
+                    "action": "modify",
+                    "content": "def run(): print('hello')"
+                }
+            ]
+        }
+        
+        py_op = OpSpec(
+            id="op_build_non_visual",
+            tenant_id="t1",
+            brand_id="b1",
+            domain="build",
+            action="build.deliver",
+            params={
+                "intent": "edit python backend",
+                "branch_name": "aos-build-py",
+                "repo": temp_git_remote
+            },
+            severity=Severity(impact=2, reversibility=Reversibility.REVERSIBLE),
+            cost_estimate=Money(amount_minor=1000, currency="INR"),
+        )
+        
+        preview_art = adapter.preview(py_op)
+        assert preview_art.kind == "build_preview"
+        assert "Brand Guardian Review" not in preview_art.summary
+        assert "design_review" not in py_op.params
+
+def test_build_adapter_preview_quality_gates_passed(adapter, build_op, mock_urlopen_globally):
+    mock_urlopen_globally.return_value.read.return_value = b"<html><div>Normal Page</div></html>"
+    
+    preview_art = adapter.preview(build_op)
+    assert preview_art.kind == "build_preview"
+    assert "✅ Accessibility Review: PASSED" in preview_art.summary
+    assert "✅ Performance Review: PASSED" in preview_art.summary
+    assert "accessibility_review" in build_op.params
+    assert "performance_review" in build_op.params
+    assert build_op.params["accessibility_review"]["passed"] is True
+    assert build_op.params["performance_review"]["passed"] is True
+
+def test_build_adapter_preview_accessibility_failed(adapter, build_op, mock_urlopen_globally):
+    mock_urlopen_globally.return_value.read.return_value = b"<html><div class='fail-a11y'>Violating markup</div></html>"
+    
+    preview_art = adapter.preview(build_op)
+    assert preview_art.kind == "build_preview"
+    assert "♿ Accessibility Review: FAILED" in preview_art.summary
+    assert "Image missing alt text (WCAG 1.1.1)" in preview_art.summary
+    assert build_op.params["accessibility_review"]["passed"] is False
+    assert build_op.params["accessibility_review"]["score_percent"] == 60
+
+def test_build_adapter_preview_performance_failed(adapter, build_op, mock_urlopen_globally):
+    mock_urlopen_globally.return_value.read.return_value = b"<html><div class='fail-perf'>Heavy scripts</div></html>"
+    
+    preview_art = adapter.preview(build_op)
+    assert preview_art.kind == "build_preview"
+    assert "⏱️ Performance Review: FAILED" in preview_art.summary
+    assert "Render-blocking scripts in head" in preview_art.summary
+    assert build_op.params["performance_review"]["passed"] is False
+    assert build_op.params["performance_review"]["score_percent"] == 55
+

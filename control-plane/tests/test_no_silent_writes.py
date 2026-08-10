@@ -21,11 +21,6 @@ ALLOWED_PATHS = [
     'app/adapters',
     'app/kernel/loop.py',
     'migrations',
-    # Operator-driven onboarding/bootstrap path: seeds Connection + BrandProperty
-    # directly during the initial OAuth handshake and RAG bootstrap. Analogous to
-    # the adapters' provisioning writes.
-    # TODO: route through governed Ops once self-serve onboarding is built.
-    'app/routers/onboarding.py',
 ]
 
 # -----------------------------------------------------------------------------
@@ -207,6 +202,14 @@ def test_static_no_silent_writes():
                 elif relative_path_key == os.path.normpath('app/main.py'):
                     # Operator-level admin routes in main.py manage Tenant records directly.
                     allowed_models = {'Tenant'}
+                elif relative_path_key == os.path.normpath('app/routers/onboarding.py'):
+                    # Onboarding router seeds Connection directly.
+                    # TODO: route through governed Ops once self-serve onboarding is built.
+                    allowed_models = {'Connection'}
+                elif relative_path_key == os.path.normpath('app/services/brand_identity.py'):
+                    # RAG bootstrapping writes BrandProperty directly.
+                    # TODO: route through governed Ops once self-serve onboarding is built.
+                    allowed_models = {'BrandProperty'}
 
                 file_violations = check_file_for_silent_writes(full_path, allowed_models=allowed_models)
                 violations.extend(file_violations)

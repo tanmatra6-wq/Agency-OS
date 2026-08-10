@@ -18,15 +18,31 @@ export default function Home() {
   const [createTenantLoading, setCreateTenantLoading] = useState(false);
   const [createTenantError, setCreateTenantError] = useState<string | null>(null);
   const [showDashboardOverride, setShowDashboardOverride] = useState(false);
+  const [isOnboarded, setIsOnboarded] = useState<boolean | null>(null);
 
-  const isFirstRun = knownTenants.length <= 1 && tenantId === "t1";
+  // Fetch actual database onboarding status on mount
+  useEffect(() => {
+    const checkOnboarded = async () => {
+      try {
+        const res = await request("/readyz", "get") as { status: string; onboarded: boolean };
+        setIsOnboarded(res.onboarded);
+      } catch (err) {
+        console.error("Failed to query backend onboarding status:", err);
+        // Fallback to local storage heuristics
+        setIsOnboarded(knownTenants.length > 1 || tenantId !== "t1");
+      }
+    };
+    checkOnboarded();
+  }, [request, knownTenants.length, tenantId]);
+
+  const isFirstRun = isOnboarded === false;
 
   // Redirect to dashboard twin page once onboarded
   useEffect(() => {
-    if (!isFirstRun || showDashboardOverride) {
+    if (isOnboarded === true || showDashboardOverride) {
       router.push("/twin");
     }
-  }, [isFirstRun, showDashboardOverride, router]);
+  }, [isOnboarded, showDashboardOverride, router]);
 
   const handleCreateTenant = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -42,6 +58,7 @@ export default function Home() {
       
       addKnownTenant(res.tenant_id, newTenantName.trim(), res.brand_id, newBrandName.trim());
       setTenantId(res.tenant_id);
+      setIsOnboarded(true);
       
       setNewTenantName("");
       setNewBrandName("");

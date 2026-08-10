@@ -7,28 +7,44 @@ import OpsPage from "./(dashboard)/ops/page";
 
 // Mock Tenant Context
 let mockRole = "AGENCY_OWNER";
-const mockSetRole = vi.fn();
+let mockTenantId = "t1";
+let mockKnownTenants = [
+  { tenantId: "t1", tenantName: "Bootstrap Developer", brandId: "brand-bootstrap", brandName: "Bootstrap Brand" }
+];
+let mockOperatorToken = "";
+const mockSetRole = vi.fn().mockImplementation((val) => {
+  mockRole = val;
+});
+const mockSetTenantId = vi.fn().mockImplementation((val) => {
+  mockTenantId = val;
+});
+const mockSetOperatorToken = vi.fn().mockImplementation((val) => {
+  mockOperatorToken = val;
+});
+const mockAddKnownTenant = vi.fn().mockImplementation((tId, tName, bId, bName) => {
+  mockKnownTenants.push({ tenantId: tId, tenantName: tName, brandId: bId, brandName: bName });
+});
+
 vi.mock("@/contexts/TenantContext", () => ({
   useTenant: () => ({
-    tenantId: "t1",
-    setTenantId: vi.fn(),
+    tenantId: mockTenantId,
+    setTenantId: mockSetTenantId,
     activeBrandId: "brand-bootstrap",
     setActiveBrandId: vi.fn(),
     role: mockRole,
     setRole: mockSetRole,
-    operatorToken: "",
-    setOperatorToken: vi.fn(),
-    knownTenants: [
-      { tenantId: "t1", tenantName: "Bootstrap Developer", brandId: "brand-bootstrap", brandName: "Bootstrap Brand" },
-    ],
-    addKnownTenant: vi.fn(),
+    operatorToken: mockOperatorToken,
+    setOperatorToken: mockSetOperatorToken,
+    knownTenants: mockKnownTenants,
+    addKnownTenant: mockAddKnownTenant,
   }),
 }));
 
 // Mock Next.js Navigation
+const mockPush = vi.fn();
 vi.mock("next/navigation", () => ({
   usePathname: () => "/ops",
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+  useRouter: () => ({ push: mockPush, replace: vi.fn() }),
   useSearchParams: () => new URLSearchParams(),
 }));
 
@@ -132,3 +148,86 @@ describe("Operator Actions panel (explicit controls, no chat)", () => {
     });
   });
 });
+
+
+import Home from "./page";
+
+describe("Home Onboarding Page", () => {
+  beforeEach(() => {
+    mockRole = "AGENCY_OWNER";
+    mockTenantId = "t1";
+    mockKnownTenants = [
+      { tenantId: "t1", tenantName: "Bootstrap Developer", brandId: "brand-bootstrap", brandName: "Bootstrap Brand" }
+    ];
+    mockOperatorToken = "";
+    vi.clearAllMocks();
+  });
+
+  it("renders the onboarding screen when backend says not onboarded", async () => {
+    // Mock readyz returning onboarded: false
+    mockRequest.mockResolvedValueOnce({ status: "ready", onboarded: false });
+
+    render(<Home />);
+
+    // Renders "Loading..." initially
+    expect(screen.getByText("Loading workspace context...")).toBeTruthy();
+
+    // Renders the Onboarding Form elements once resolved
+    const welcomeHeading = await screen.findByText("Welcome to Agency-OS");
+    expect(welcomeHeading).toBeTruthy();
+    expect(screen.getByPlaceholderText("Paste your OPERATOR_TOKEN")).toBeTruthy();
+    expect(screen.getByPlaceholderText("e.g. Trending Media Group")).toBeTruthy();
+    expect(screen.getByPlaceholderText("e.g. Ableys Retail")).toBeTruthy();
+  });
+
+  it("redirects to /twin when backend says already onboarded", async () => {
+    // Mock readyz returning onboarded: true
+    mockRequest.mockResolvedValueOnce({ status: "ready", onboarded: true });
+
+    render(<Home />);
+
+    // Should redirect to /twin via router.push
+    await waitFor(() => {
+      expect(mockPush).toHaveBeenCalledWith("/twin");
+    });
+  });
+
+  it("submits the form to /tenants and transitions to onboarded", async () => {
+    mockRequest.mockImplementation((path: string, method?: string, _body?: unknown) => {
+      if (path === "/readyz" && method === "get") {
+        return Promise.resolve({ status: "ready", onboarded: false });
+      }
+      if (path === "/tenants" && method === "post") {
+        return Promise.resolve({ tenant_id: "tenant-xyz", brand_id: "brand-123" });
+      }
+      return Promise.resolve(null);
+    });
+
+    render(<Home />);
+
+    // Fill form
+    const tokenInput = await screen.findByPlaceholderText("Paste your OPERATOR_TOKEN");
+    fireEvent.change(tokenInput, { target: { value: "my-secret-op-token" } });
+
+    const tenantInput = screen.getByPlaceholderText("e.g. Trending Media Group");
+    fireEvent.change(tenantInput, { target: { value: "My New Tenant" } });
+
+    const brandInput = screen.getByPlaceholderText("e.g. Ableys Retail");
+    fireEvent.change(brandInput, { target: { value: "My Brand" } });
+
+    // Submit
+    const submitBtn = screen.getByRole("button", { name: /Onboard & Launch Console/i });
+    fireEvent.click(submitBtn);
+
+    await waitFor(() => {
+      expect(mockRequest).toHaveBeenCalledWith("/tenants", "post", {
+        name: "My New Tenant",
+        brand_name: "My Brand"
+      });
+      expect(mockAddKnownTenant).toHaveBeenCalledWith("tenant-xyz", "My New Tenant", "brand-123", "My Brand");
+      expect(mockSetTenantId).toHaveBeenCalledWith("tenant-xyz");
+      expect(mockPush).toHaveBeenCalledWith("/twin");
+    });
+  });
+});
+

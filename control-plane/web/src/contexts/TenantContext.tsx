@@ -17,7 +17,8 @@ interface TenantContextType {
   role: string;
   setRole: (role: string) => void;
   operatorToken: string;
-  setOperatorToken: (token: string) => void;
+  setOperatorToken: (token: string) => Promise<void>;
+  sessionToken: string;
   knownTenants: KnownTenant[];
   addKnownTenant: (tenantId: string, tenantName: string, brandId: string, brandName: string) => void;
 }
@@ -38,6 +39,7 @@ export function TenantProvider({ children }: { children: React.ReactNode }) {
   const [activeBrandId, setActiveBrandIdState] = useState<string | null>("brand-bootstrap");
   const [role, setRoleState] = useState<string>("AGENCY_OWNER"); // default dev role
   const [operatorToken, setOperatorTokenState] = useState<string>("");
+  const [sessionToken, setSessionTokenState] = useState<string>("");
   const [knownTenants, setKnownTenants] = useState<KnownTenant[]>(DEFAULT_TENANTS);
 
   // Load from localStorage on client boot
@@ -59,6 +61,10 @@ export function TenantProvider({ children }: { children: React.ReactNode }) {
     if (savedToken) {
       setOperatorTokenState(savedToken);
     }
+    const savedSessionToken = localStorage.getItem("aos_session_token");
+    if (savedSessionToken) {
+      setSessionTokenState(savedSessionToken);
+    }
 
     const savedKnownTenants = localStorage.getItem("aos_known_tenants");
     if (savedKnownTenants) {
@@ -71,12 +77,12 @@ export function TenantProvider({ children }: { children: React.ReactNode }) {
     /* eslint-enable react-hooks/set-state-in-effect */
   }, []);
 
-  // Fetch tenants from backend on boot to sync with DB
+  // Fetch tenants from backend on boot or when token changes
   useEffect(() => {
     const fetchTenants = async () => {
       const baseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-      // GET /tenants is operator-gated; attach the bearer token if the operator has set one.
-      const token = localStorage.getItem("aos_operator_token");
+      // GET /tenants is operator-gated; attach the session bearer token or raw operator token if set.
+      const token = sessionToken || operatorToken;
       try {
         const res = await fetch(`${baseUrl}/tenants`, {
           headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -110,7 +116,7 @@ export function TenantProvider({ children }: { children: React.ReactNode }) {
     };
     
     fetchTenants();
-  }, []);
+  }, [sessionToken, operatorToken]);
 
   const setTenantId = (id: string) => {
     setTenantIdState(id);
@@ -137,12 +143,34 @@ export function TenantProvider({ children }: { children: React.ReactNode }) {
     localStorage.setItem("aos_role", r);
   };
 
-  const setOperatorToken = (token: string) => {
+  const setOperatorToken = async (token: string) => {
     setOperatorTokenState(token);
-    if (token) {
-      localStorage.setItem("aos_operator_token", token);
-    } else {
+    if (!token) {
+      setSessionTokenState("");
+      localStorage.removeItem("aos_session_token");
       localStorage.removeItem("aos_operator_token");
+      return;
+    }
+    
+    // Store raw operator token (mostly for dev debugging / easy reload)
+    localStorage.setItem("aos_operator_token", token);
+    
+    // Bootstrap session on backend
+    try {
+      const baseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const res = await fetch(`${baseUrl}/session/bootstrap`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ operator_token: token })
+      });
+      if (!res.ok) throw new Error("Invalid operator token");
+      const data = await res.json();
+      setSessionTokenState(data.session_token);
+      localStorage.setItem("aos_session_token", data.session_token);
+    } catch (err) {
+      console.error("Session bootstrap failed, falling back to raw token:", err);
+      setSessionTokenState(token);
+      localStorage.setItem("aos_session_token", token);
     }
   };
 
@@ -166,6 +194,7 @@ export function TenantProvider({ children }: { children: React.ReactNode }) {
       setRole,
       operatorToken,
       setOperatorToken,
+      sessionToken,
       knownTenants,
       addKnownTenant
     }}>

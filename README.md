@@ -36,4 +36,6 @@ This repository contains the Agency OS project codebase, containing the governan
 
 ## Configuration
 
-The control plane runs SQLite by default. To override with an external Postgres database, specify `AOS_DB_URL`.
+The control plane runs PostgreSQL by default (with Row-Level Security enabled). Configure the database connections using the following environment variables:
+*   `DATABASE_URL`: Injects transaction-scoped PostgreSQL session (respects RLS policies). Defaults to `postgresql+asyncpg://postgres:postgres@localhost:5432/agency_os`.
+*   `WORKER_DATABASE_URL`: Injects a privileged database session for background workers (bypasses RLS). Defaults to the same value as `DATABASE_URL`.

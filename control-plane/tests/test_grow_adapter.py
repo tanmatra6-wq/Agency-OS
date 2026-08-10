@@ -217,5 +217,139 @@ def test_grow_adapter_compensate_alert(adapter):
     comp = adapter.compensate(op)
     assert len(comp) == 0
 
+@pytest.mark.asyncio
+async def test_grow_adapter_audience_create(adapter):
+    # Plan
+    ops = adapter.plan("create audience HighValueUsers lookalike 2%", "t1", "b1")
+    assert len(ops) == 1
+    op = ops[0]
+    assert op.action == "grow.audience.create"
+    assert op.params["audience_name"] == "HighValueUsers"
+    assert op.params["lookalike_params"]["ratio"] == "2%"
+
+    # Preview
+    preview_art = adapter.preview(op)
+    assert preview_art.kind == "audience_create_preview"
+    assert "HighValueUsers" in preview_art.summary
+
+    # Execute
+    res = await adapter.execute(op, "idem_aud_123")
+    assert res.ok is True
+    assert "audience_id" in res.detail
+
+    # Verify & Compensate
+    verdict = await adapter.verify(op)
+    assert verdict.ok is True
+    assert verdict.checks["audience_created"] is True
+    
+    assert len(adapter.compensate(op)) == 0
+
+@pytest.mark.asyncio
+async def test_grow_adapter_keyword_bid_strategy(adapter):
+    # Plan
+    ops = adapter.plan("set keyword bid strategy for campaign camp-123 target_roas value 4.5", "t1", "b1")
+    assert len(ops) == 1
+    op = ops[0]
+    assert op.action == "grow.strategy.keyword_bid"
+    assert op.params["campaign_id"] == "camp-123"
+    assert op.params["strategy_type"] == "target_roas"
+    assert op.params["value"] == 4.5
+
+    # Preview
+    preview_art = adapter.preview(op)
+    assert preview_art.kind == "strategy_keyword_bid_preview"
+
+    # Execute
+    res = await adapter.execute(op, "idem_strategy_123")
+    assert res.ok is True
+
+    # Verify
+    verdict = await adapter.verify(op)
+    assert verdict.ok is True
+    assert verdict.checks["bid_strategy_applied"] is True
+
+@pytest.mark.asyncio
+async def test_grow_adapter_creative_audit(adapter):
+    # Plan
+    ops = adapter.plan("audit creative performance for campaign camp-123", "t1", "b1")
+    assert len(ops) == 1
+    op = ops[0]
+    assert op.action == "grow.audit.creative"
+    assert op.params["campaign_id"] == "camp-123"
+
+    # Preview
+    preview_art = adapter.preview(op)
+    assert preview_art.kind == "audit_creative_preview"
+
+    # Execute
+    res = await adapter.execute(op, "idem_audit_123")
+    assert res.ok is True
+    assert res.detail["total_creatives_audited"] == 2
+    assert len(res.detail["underperforming_creatives"]) == 1
+
+    # Verify
+    verdict = await adapter.verify(op)
+    assert verdict.ok is True
+    assert verdict.checks["creative_audited"] is True
+
+@pytest.mark.asyncio
+async def test_grow_adapter_execute_and_verify_budget_reallocate(adapter):
+    client = MockMarketingClient()
+    await client.create_campaign("camp-src", "source-camp", 200000, 15000)
+    await client.create_campaign("camp-tgt", "target-camp", 100000, 15000)
+    
+    op = OpSpec(
+        id="op_reallocate_123",
+        tenant_id="t1",
+        brand_id="b1",
+        domain="grow",
+        action="grow.budget.reallocate",
+        params={
+            "source_campaign_id": "camp-src",
+            "target_campaign_id": "camp-tgt",
+            "transfer_amount_minor": 50000,
+            "provider": "google-ads"
+        },
+        severity=Severity(impact=1, reversibility=Reversibility.REVERSIBLE),
+        cost_estimate=Money(amount_minor=0, currency="INR")
+    )
+    
+    res = await adapter.execute(op, "idem_reallocate_123")
+    assert res.ok is True
+    
+    verdict = await adapter.verify(op)
+    assert verdict.ok is True
+    assert verdict.checks["budget_reallocated"] is True
+    
+    src_camp = await client.get_campaign("camp-src")
+    tgt_camp = await client.get_campaign("camp-tgt")
+    assert src_camp["budget_minor"] == 150000
+    assert tgt_camp["budget_minor"] == 150000
+
+def test_grow_adapter_compensate_budget_reallocate(adapter):
+    op = OpSpec(
+        id="op_reallocate_123",
+        tenant_id="t1",
+        brand_id="b1",
+        domain="grow",
+        action="grow.budget.reallocate",
+        params={
+            "source_campaign_id": "camp-src",
+            "target_campaign_id": "camp-tgt",
+            "transfer_amount_minor": 50000,
+            "provider": "google-ads"
+        },
+        severity=Severity(impact=1, reversibility=Reversibility.REVERSIBLE),
+        cost_estimate=Money(amount_minor=0, currency="INR")
+    )
+    compensations = adapter.compensate(op)
+    assert len(compensations) == 1
+    comp = compensations[0]
+    assert comp.action == "grow.budget.reallocate"
+    assert comp.params["source_campaign_id"] == "camp-tgt"
+    assert comp.params["target_campaign_id"] == "camp-src"
+    assert comp.params["transfer_amount_minor"] == 50000
+
+
 
 

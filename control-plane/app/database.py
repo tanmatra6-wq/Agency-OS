@@ -12,8 +12,12 @@ DATABASE_URL = os.getenv(
     "DATABASE_URL",
     "postgresql+asyncpg://postgres:postgres@localhost:5432/agency_os",
 )
-if os.getenv("ENV") == "production" and "localhost" in DATABASE_URL:
-    raise RuntimeError("PRODUCTION BOOT ERROR: DATABASE_URL still points at localhost")
+if os.getenv("ENV") == "production":
+    if "localhost" in DATABASE_URL or "127.0.0.1" in DATABASE_URL:
+        raise RuntimeError("PRODUCTION BOOT ERROR: DATABASE_URL still points at localhost/127.0.0.1")
+    if DATABASE_URL.startswith("sqlite"):
+        raise RuntimeError("PRODUCTION BOOT ERROR: DATABASE_URL cannot use SQLite in production mode")
+
 
 if DATABASE_URL.startswith("sqlite"):
     engine = create_async_engine(DATABASE_URL, echo=False)
@@ -55,6 +59,12 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 
 WORKER_DATABASE_URL = os.getenv("WORKER_DATABASE_URL", DATABASE_URL)
+if os.getenv("ENV") == "production":
+    if "localhost" in WORKER_DATABASE_URL or "127.0.0.1" in WORKER_DATABASE_URL:
+        raise RuntimeError("PRODUCTION BOOT ERROR: WORKER_DATABASE_URL still points at localhost/127.0.0.1")
+    if WORKER_DATABASE_URL.startswith("sqlite"):
+        raise RuntimeError("PRODUCTION BOOT ERROR: WORKER_DATABASE_URL cannot use SQLite in production mode")
+
 if WORKER_DATABASE_URL.startswith("sqlite"):
     worker_engine = create_async_engine(WORKER_DATABASE_URL, echo=False)
 else:

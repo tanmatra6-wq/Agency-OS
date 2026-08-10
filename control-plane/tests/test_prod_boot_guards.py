@@ -30,43 +30,85 @@ def restore_sys_modules_after_test():
         if mod == "app" or mod.startswith("app."):
             sys.modules[mod] = val
 
+def setup_valid_prod_env(monkeypatch):
+    """Sets up a baseline environment with valid production settings."""
+    monkeypatch.setenv("ENV", "production")
+    monkeypatch.setenv("OPERATOR_TOKEN", "secure-prod-operator-token-xyz")
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://postgres:postgres@10.0.0.1:5432/agency_os")
+    monkeypatch.setenv("WORKER_DATABASE_URL", "postgresql+asyncpg://postgres:postgres@10.0.0.2:5432/agency_os")
+    
+    for var in [
+        "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET",
+        "SHOPIFY_CLIENT_ID", "SHOPIFY_CLIENT_SECRET",
+        "WHATSAPP_TOKEN", "WHATSAPP_VERIFY_TOKEN", "WHATSAPP_APP_SECRET", "WHATSAPP_PHONE_NUMBER_ID"
+    ]:
+        monkeypatch.setenv(var, "secure-prod-value-xyz")
+    monkeypatch.setenv("SECRET_KEY", "projects/control-plane-project/secrets/aos-oauth-state-secret/versions/latest")
+
+    # Explicitly clear mock settings to prevent test env leaks
+    for var in ["AOS_MOCK_CAMPAIGNS_FILE", "AOS_MOCK_SECRETS_FILE", "AOS_MOCK_STORAGE_FILE", "MOCK_PLAYWRIGHT"]:
+        monkeypatch.delenv(var, raising=False)
+
+
+
 def test_prod_boot_guards_operator_token(monkeypatch):
     # Case 1: ENV=production + OPERATOR_TOKEN=default-dev-token -> RuntimeError
-    # We must set DATABASE_URL to a non-localhost URL and WHATSAPP_APP_SECRET so that other guards pass!
-    monkeypatch.setenv("ENV", "production")
+    setup_valid_prod_env(monkeypatch)
     monkeypatch.setenv("OPERATOR_TOKEN", "default-dev-token")
-    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://postgres:postgres@10.0.0.1:5432/agency_os")
-    monkeypatch.setenv("WHATSAPP_APP_SECRET", "mock-whatsapp-secret")
     clean_imports()
-    
+
     with pytest.raises(RuntimeError) as exc_info:
         import app.main
-    assert "OPERATOR_TOKEN must be explicitly set" in str(exc_info.value)
+    assert "OPERATOR_TOKEN" in str(exc_info.value)
+
+
+
+def test_prod_boot_guards_secret_key(monkeypatch):
+    # ENV=production + SECRET_KEY left at the built-in default -> RuntimeError
+    monkeypatch.setenv("ENV", "production")
+    monkeypatch.setenv("OPERATOR_TOKEN", "super-secret-token")
+    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://postgres:postgres@10.0.0.1:5432/agency_os")
+    monkeypatch.setenv("WHATSAPP_APP_SECRET", "mock-whatsapp-secret")
+    monkeypatch.delenv("SECRET_KEY", raising=False)
+    clean_imports()
+
+    with pytest.raises(RuntimeError) as exc_info:
+        import app.services.oauth
+    assert "SECRET_KEY must" in str(exc_info.value)
 
 def test_prod_boot_guards_database_url(monkeypatch):
     # Case 2: ENV=production + DATABASE_URL contains localhost -> RuntimeError
-    monkeypatch.setenv("ENV", "production")
+    setup_valid_prod_env(monkeypatch)
     monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:5432/agency_os")
-    monkeypatch.setenv("WHATSAPP_APP_SECRET", "mock-whatsapp-secret")
     clean_imports()
     
     with pytest.raises(RuntimeError) as exc_info:
         import app.database
     assert "DATABASE_URL still points at localhost" in str(exc_info.value)
 
-def test_prod_boot_guards_valid_prod(monkeypatch):
-    # Case 3: ENV=production + valid OPERATOR_TOKEN + valid DATABASE_URL -> boots fine
-    monkeypatch.setenv("ENV", "production")
-    monkeypatch.setenv("OPERATOR_TOKEN", "super-secret-token")
-    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://postgres:postgres@10.0.0.1:5432/agency_os")
-    monkeypatch.setenv("WHATSAPP_APP_SECRET", "mock-whatsapp-secret")
+
+def test_prod_boot_guards_database_url_sqlite(monkeypatch):
+    # Case 2b: ENV=production + DATABASE_URL starts with sqlite -> RuntimeError
+    setup_valid_prod_env(monkeypatch)
+    monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///agencyos.db")
     clean_imports()
     
+    with pytest.raises(RuntimeError) as exc_info:
+        import app.database
+    assert "DATABASE_URL cannot use SQLite" in str(exc_info.value)
+
+
+def test_prod_boot_guards_valid_prod(monkeypatch):
+    # Case 3: ENV=production + valid baseline -> boots fine
+    setup_valid_prod_env(monkeypatch)
+    clean_imports()
+
     try:
         import app.database
         import app.main
     except RuntimeError as e:
         pytest.fail(f"Boots failed in valid production configuration: {e}")
+
 
 def test_prod_boot_guards_dev_mode(monkeypatch):
     # Case 4: ENV=dev/empty + default tokens -> boots fine
@@ -81,3 +123,29 @@ def test_prod_boot_guards_dev_mode(monkeypatch):
         import app.main
     except RuntimeError as e:
         pytest.fail(f"Boots failed in dev mode: {e}")
+
+
+
+
+def test_prod_boot_guards_mock_secret_fails(monkeypatch):
+    # Case 5: ENV=production + mock GOOGLE_CLIENT_ID -> RuntimeError
+    setup_valid_prod_env(monkeypatch)
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "mock-google-id")
+    clean_imports()
+    with pytest.raises(RuntimeError) as exc_info:
+        import app.main
+    assert "GOOGLE_CLIENT_ID" in str(exc_info.value)
+    assert "cannot be configured to a development or mock value" in str(exc_info.value)
+
+
+def test_prod_boot_guards_mock_file_enabled_fails(monkeypatch):
+    # Case 6: ENV=production + mock files configured -> RuntimeError
+    setup_valid_prod_env(monkeypatch)
+    monkeypatch.setenv("AOS_MOCK_CAMPAIGNS_FILE", "campaigns.json")
+    clean_imports()
+    with pytest.raises(RuntimeError) as exc_info:
+        import app.main
+    assert "AOS_MOCK_CAMPAIGNS_FILE" in str(exc_info.value)
+    assert "must be disabled or unset" in str(exc_info.value)
+
+

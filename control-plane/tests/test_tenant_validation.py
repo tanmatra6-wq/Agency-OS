@@ -79,3 +79,59 @@ async def test_tenant_validation_lifecycle(client: AsyncClient, session):
     finally:
         # Restore bypass to ensure other tests in the suite do not break
         app.state.bypass_tenant_validation = True
+
+
+@pytest.mark.asyncio
+async def test_tenant_validation_cache_ttl(client: AsyncClient, session):
+    from unittest.mock import patch
+    import time
+    
+    app.state.bypass_tenant_validation = False
+    try:
+        VALID_TENANTS_CACHE.clear()
+        
+        # 1. Create a tenant
+        r = await client.post(
+            "/tenants",
+            headers={"Authorization": "Bearer default-dev-token"},
+            json={"name": "TTL Tenant", "brand_name": "TTL Brand"}
+        )
+        assert r.status_code == 200
+        tenant_id = r.json()["tenant_id"]
+        
+        # Verify it's in cache
+        assert tenant_id in VALID_TENANTS_CACHE
+        
+        # Mock database session maker to raise error if hit
+        def raise_db_error(*args, **kwargs):
+            raise RuntimeError("DB_WAS_HIT")
+            
+        original_session_maker = app.state.db_session_maker
+        
+        # 2. Case A: Check cache access within TTL (e.g. +10 seconds).
+        # We mock time.monotonic to simulate 10 seconds passing.
+        current_time = time.monotonic()
+        with patch("time.monotonic", return_value=current_time + 10):
+            app.state.db_session_maker = raise_db_error
+            try:
+                r = await client.get("/actions/catalog", headers={"X-Tenant-ID": tenant_id})
+                # Must succeed (200) since it hits the cache
+                assert r.status_code == 200
+            finally:
+                app.state.db_session_maker = original_session_maker
+
+        # 3. Case B: Check cache access past TTL (e.g. +600 seconds).
+        # We mock time.monotonic to simulate 10 minutes passing.
+        with patch("time.monotonic", return_value=current_time + 600):
+            app.state.db_session_maker = raise_db_error
+            try:
+                r = await client.get("/actions/catalog", headers={"X-Tenant-ID": tenant_id})
+                # Must fail-closed with 500 because cache expired and it hit the raise_db_error session maker
+                assert r.status_code == 500
+                assert r.json()["detail"] == "Internal server error during tenant verification."
+            finally:
+                app.state.db_session_maker = original_session_maker
+
+    finally:
+        app.state.bypass_tenant_validation = True
+

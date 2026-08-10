@@ -5,7 +5,7 @@ loop.preview_and_gate, but nothing executes them unless the outbox is drained.
 /ops/{id}/decision drains on manual approval; /chat (and /intents) auto-approve
 without a /decision call, so they must drain themselves — otherwise approved Ops
 sit at APPROVED forever (the prod "host <domain>" symptom)."""
-import app.main as mainmod
+import app.routers.actions as actionsmod
 
 
 async def test_chat_enqueues_outbox_drain(client, monkeypatch):
@@ -14,7 +14,7 @@ async def test_chat_enqueues_outbox_drain(client, monkeypatch):
     def fake_enqueue(background_tasks, session_maker=None):
         called["yes"] = True
 
-    monkeypatch.setattr(mainmod, "enqueue_drain", fake_enqueue)
+    monkeypatch.setattr(actionsmod, "enqueue_drain", fake_enqueue)
 
     r = await client.post("/tenants", json={"name": "AutoExec", "brand_name": "Brand"})
     assert r.status_code == 200

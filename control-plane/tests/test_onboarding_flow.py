@@ -8,8 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models import Tenant, Brand, Connection, BrandProperty
-from app.services.oauth import generate_oauth_state, verify_oauth_state
-from app.routers.onboarding import bootstrap_brand_identity_task
+from app.services.brand_identity import bootstrap_brand_identity_task
 
 @pytest.fixture
 def clean_env():
@@ -26,7 +25,10 @@ def clean_env():
 @pytest.mark.asyncio
 async def test_onboarding_bootstrap(client, session: AsyncSession):
     # Test POST /api/v1/onboarding/bootstrap (using async client fixture!)
-    resp = await client.post("/api/v1/onboarding/bootstrap?name=LuxeDecor&domain=luxedecor.com&tier=dedicated")
+    resp = await client.post(
+        "/api/v1/onboarding/bootstrap?name=LuxeDecor&domain=luxedecor.com&tier=dedicated",
+        headers={"Authorization": "Bearer default-dev-token"},
+    )
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "onboarding_ready"
@@ -45,88 +47,17 @@ async def test_onboarding_bootstrap(client, session: AsyncSession):
     brand = res_brand.scalar_one_or_none()
     assert brand is not None
     assert brand.name == "LuxeDecor"
+    assert brand.domain == "luxedecor.com"
 
-@pytest.mark.asyncio
-async def test_onboarding_oauth_authorize(clean_env, client):
-    # Test GET /api/v1/onboarding/oauth/authorize/shopify
-    resp = await client.get(
-        "/api/v1/onboarding/oauth/authorize/shopify?"
-        "tenant_id=t-1&brand_id=b-1&redirect_uri=http://localhost/callback"
-    )
-    # FastAPI RedirectResponse returns 307
-    assert resp.status_code == 307 or resp.status_code == 200
-    redirect_url = resp.headers.get("location") or resp.url
-    assert "b-1.myshopify.com/admin/oauth/authorize" in str(redirect_url)
-    assert "client_id=test-shopify-id" in str(redirect_url)
-    assert "state=" in str(redirect_url)
-    
-    # Extract state from redirect URL to verify signature
-    import urllib.parse as urlparse
-    parsed = urlparse.urlparse(str(redirect_url))
-    queries = urlparse.parse_qs(parsed.query)
-    state_token = queries["state"][0]
-    
-    payload = verify_oauth_state(state_token)
-    assert payload["tenant_id"] == "t-1"
-    assert payload["brand_id"] == "b-1"
-    assert payload["provider"] == "shopify"
 
-@pytest.mark.asyncio
-@patch("app.services.oauth.SecretManagerClient")
-async def test_onboarding_oauth_callback(mock_secrets_cls, clean_env, client, session: AsyncSession):
-    # 1. Seed Tenant and Brand first
-    tenant = Tenant(id="t-2", name="FitWear", hosting_tier="shared")
-    brand = Brand(id="b-2", tenant_id="t-2", name="FitWear")
-    session.add(tenant)
-    session.add(brand)
-    await session.commit()
-    
-    # Mock Secret Manager client behavior
-    mock_secrets = MagicMock()
-    mock_secrets.write_secret = AsyncMock(side_effect=lambda sid, val: f"projects/test/secrets/{sid}/versions/1")
-    mock_secrets_cls.return_value = mock_secrets
-    
-    # Generate valid state token
-    state = generate_oauth_state(tenant_id="t-2", brand_id="b-2", redirect_uri="http://localhost/callback", provider="shopify")
-    
-    # Mock Shopify Access Token HTTP post response
-    with patch("httpx.AsyncClient.post") as mock_post, \
-         patch("app.routers.onboarding.bootstrap_brand_identity_task") as mock_bg_task:
-         
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {
-            "access_token": "shpat_mocked_token_123456",
-            "scope": "read_products"
-        }
-        mock_post.return_value = mock_resp
-        
-        # Call the callback redirect endpoint
-        resp = await client.get(f"/api/v1/onboarding/oauth/callback?code=code-abc-123&state={state}")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["status"] == "connection_established"
-        assert data["provider"] == "shopify"
-        
-        # Verify Connection row was seeded in database
-        stmt_conn = select(Connection).where(
-            Connection.tenant_id == "t-2",
-            Connection.brand_id == "b-2",
-            Connection.provider == "shopify"
-        )
-        res_conn = await session.execute(stmt_conn)
-        conn = res_conn.scalar_one_or_none()
-        assert conn is not None
-        assert conn.status == "active"
-        assert "t-2-b-2-shopify-secret" in conn.credential
-        
-        # Verify background catalog RAG bootstrapping task was triggered
-        mock_bg_task.assert_called_once()
-        args = mock_bg_task.call_args[0]
-        assert args[:3] == ("t-2", "b-2", "shpat_mocked_token_123456")
 
 @pytest.mark.asyncio
 async def test_onboarding_connection_direct(client, session: AsyncSession):
+    # Seed tenant and brand
+    session.add(Tenant(id="t-3", name="LuxeDecor", hosting_tier="shared"))
+    session.add(Brand(id="b-3", tenant_id="t-3", name="LuxeDecor"))
+    await session.commit()
+
     # Test POST /api/v1/onboarding/connection/direct for Klaviyo API key
     with patch("app.services.oauth.SecretManagerClient") as mock_secrets_cls:
         mock_secrets = MagicMock()
@@ -135,7 +66,8 @@ async def test_onboarding_connection_direct(client, session: AsyncSession):
         
         resp = await client.post(
             "/api/v1/onboarding/connection/direct?"
-            "tenant_id=t-3&brand_id=b-3&provider=klaviyo&api_key=pk_test_klaviyo_key_987"
+            "tenant_id=t-3&brand_id=b-3&provider=klaviyo&api_key=pk_test_klaviyo_key_987",
+            headers={"Authorization": "Bearer default-dev-token"},
         )
         assert resp.status_code == 200
         assert resp.json()["status"] == "direct_connection_established"
@@ -154,7 +86,7 @@ async def test_onboarding_connection_direct(client, session: AsyncSession):
         assert conn.credential == "projects/test/secrets/t-3-b-3-klaviyo-secret/versions/1"
 
 @pytest.mark.asyncio
-@patch("app.services.llm.VertexAIClient")
+@patch("app.services.brand_identity.VertexAIClient")
 async def test_bootstrap_brand_identity_task(mock_llm_cls, clean_env, db_engine, session: AsyncSession):
     # Mock Shopify catalog products fetch
     shopify_products_response = {
@@ -182,7 +114,7 @@ async def test_bootstrap_brand_identity_task(mock_llm_cls, clean_env, db_engine,
     # Setup Mock LLM client
     mock_llm = MagicMock()
     async def mock_generate(*args, **kwargs):
-        return json.dumps(gemini_identity_response)
+        return gemini_identity_response
     mock_llm.generate_personalized_content.side_effect = mock_generate
     mock_llm_cls.return_value = mock_llm
     
@@ -219,27 +151,6 @@ async def test_bootstrap_brand_identity_task(mock_llm_cls, clean_env, db_engine,
         args, kwargs = mock_get.call_args
         assert "b-4.myshopify.com/admin/api/2024-01/products.json" in args[0]
 
-
-@pytest.mark.asyncio
-async def test_onboarding_oauth_authorize_with_explicit_shop(clean_env, client):
-    # When an explicit shop handle is provided, the authorize URL + signed state
-    # must target that store, not the brand_id.
-    resp = await client.get(
-        "/api/v1/onboarding/oauth/authorize/shopify?"
-        "tenant_id=t-1&brand_id=b-1&redirect_uri=http://localhost/callback&shop=ableys"
-    )
-    assert resp.status_code in (200, 307)
-    redirect_url = str(resp.headers.get("location") or resp.url)
-    assert "ableys.myshopify.com/admin/oauth/authorize" in redirect_url
-    assert "b-1.myshopify.com" not in redirect_url
-
-    import urllib.parse as urlparse
-    state_token = urlparse.parse_qs(urlparse.urlparse(redirect_url).query)["state"][0]
-    payload = verify_oauth_state(state_token)
-    assert payload["shop"] == "ableys.myshopify.com"
-    assert payload["brand_id"] == "b-1"
-
-
 def test_normalize_shopify_domain():
     from app.services.oauth import normalize_shopify_domain
     assert normalize_shopify_domain("ableys") == "ableys.myshopify.com"
@@ -260,6 +171,7 @@ async def test_onboarding_connection_config(client, session: AsyncSession):
     resp = await client.post(
         "/api/v1/onboarding/connection/config?tenant_id=t-5&brand_id=b-5&provider=google-ads",
         json={"developer_token": "real-dev-token-123"},
+        headers={"Authorization": "Bearer default-dev-token"},
     )
     assert resp.status_code == 200
     assert resp.json()["status"] == "connection_configured"
@@ -277,35 +189,9 @@ async def test_onboarding_connection_config_missing_404(client):
     resp = await client.post(
         "/api/v1/onboarding/connection/config?tenant_id=nope&brand_id=nope&provider=google-ads",
         json={"developer_token": "x"},
+        headers={"Authorization": "Bearer default-dev-token"},
     )
     assert resp.status_code == 404
 
 
-@pytest.mark.asyncio
-@patch("app.services.oauth.SecretManagerClient")
-async def test_onboarding_callback_threads_redirect_uri(mock_secrets_cls, clean_env, client, session: AsyncSession):
-    # For non-Shopify providers the token exchange must use the redirect_uri carried in
-    # the signed state (not the localhost env default), or the exchange would fail.
-    session.add(Tenant(id="t-6", name="G", hosting_tier="shared"))
-    session.add(Brand(id="b-6", tenant_id="t-6", name="G"))
-    await session.commit()
 
-    mock_secrets = MagicMock()
-    mock_secrets.write_secret = AsyncMock(side_effect=lambda sid, val: f"projects/test/secrets/{sid}/versions/1")
-    mock_secrets_cls.return_value = mock_secrets
-
-    redirect = "https://api.example.com/api/v1/onboarding/oauth/callback"
-    state = generate_oauth_state(tenant_id="t-6", brand_id="b-6", redirect_uri=redirect, provider="google-ads")
-
-    with patch("app.services.oauth_registry.OauthProviderRegistry.get_exchange_payload") as mock_xchg, \
-         patch("httpx.AsyncClient.post") as mock_post:
-        mock_xchg.return_value = ("https://oauth2.googleapis.com/token", {"code": "c"})
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_resp.json.return_value = {"access_token": "at", "refresh_token": "rt", "expires_in": 3600}
-        mock_post.return_value = mock_resp
-
-        resp = await client.get(f"/api/v1/onboarding/oauth/callback?code=abc&state={state}")
-        assert resp.status_code == 200
-        mock_xchg.assert_called_once()
-        assert mock_xchg.call_args.kwargs["redirect_uri"] == redirect

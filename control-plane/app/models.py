@@ -41,6 +41,7 @@ class Brand(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_id)
     tenant_id: Mapped[str] = mapped_column(ForeignKey("tenants.id", ondelete="RESTRICT"), index=True)
     name: Mapped[str] = mapped_column(String(120))
+    domain: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(default=_now)
 
     tenant: Mapped[Tenant] = relationship("Tenant")

@@ -231,4 +231,4 @@ async def test_prometheus_approval_latency_seconds(session, client, setup_tenant
     sum_after = get_metric_value(response_after.text, "aos_approval_latency_seconds_sum", {"action": "grow.campaign.create", "domain": "grow"})
     
     assert count_after - count_before == 1.0
-    assert sum_after - sum_before == 15.0
+    assert sum_after - sum_before == pytest.approx(15.0)

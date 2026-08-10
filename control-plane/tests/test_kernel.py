@@ -15,6 +15,7 @@ import pathlib
 import shutil
 
 import app.main as mainmod
+import app.routers.webhooks as webhooksmod
 from app.database import get_db, get_worker_db, get_worker_session_maker
 from app.kernel import loop
 from app.kernel.optypes import (InvalidTransition, Money, OpSpec, OpState,
@@ -186,7 +187,7 @@ async def test_drain_outbox_endpoint_returns_ok(client):
 
 async def test_whatsapp_webhook_verification(client):
     # Setup verify token
-    mainmod.WHATSAPP_VERIFY_TOKEN = "meaty"
+    webhooksmod.WHATSAPP_VERIFY_TOKEN = "meaty"
 
     # Correct token
     r = await client.get("/webhooks/whatsapp?hub.mode=subscribe&hub.challenge=1234&hub.verify_token=meaty")
@@ -209,7 +210,7 @@ async def post_signed_webhook(client, payload, secret="test_secret"):
 
 
 async def test_whatsapp_webhook_invalid_signature(client):
-    mainmod.WHATSAPP_APP_SECRET = "test_secret"
+    webhooksmod.WHATSAPP_APP_SECRET = "test_secret"
     payload = {"object": "whatsapp_business_account", "entry": []}
 
     # Missing signature
@@ -224,7 +225,7 @@ async def test_whatsapp_webhook_invalid_signature(client):
 async def test_whatsapp_webhook_signature_via_secret_manager(client):
     # Set WHATSAPP_APP_SECRET to a Secret Manager reference
     secret_ref = "projects/test-project/secrets/whatsapp-secret/versions/latest"
-    mainmod.WHATSAPP_APP_SECRET = secret_ref
+    webhooksmod.WHATSAPP_APP_SECRET = secret_ref
     
     # Seed the mock secret registry using SecretManagerClient
     from app.services.secrets import SecretManagerClient
@@ -250,7 +251,7 @@ async def test_whatsapp_webhook_signature_via_secret_manager(client):
 async def test_whatsapp_e2e_approval_flow(mock_client_class, client, db_engine):
     # Setup WhatsApp mock config
     import app.whatsapp as wa
-    mainmod.WHATSAPP_APP_SECRET = "test_secret"
+    webhooksmod.WHATSAPP_APP_SECRET = "test_secret"
     wa.WHATSAPP_TOKEN = "mock_token"
     wa.WHATSAPP_PHONE_NUMBER_ID = "12345"
     wa.WHATSAPP_APPROVER_PHONE = "919999999999"
@@ -332,7 +333,7 @@ async def test_whatsapp_e2e_approval_flow(mock_client_class, client, db_engine):
 async def test_whatsapp_e2e_rejection_flow(mock_client_class, client, db_engine):
     # Setup WhatsApp mock config
     import app.whatsapp as wa
-    mainmod.WHATSAPP_APP_SECRET = "test_secret"
+    webhooksmod.WHATSAPP_APP_SECRET = "test_secret"
     wa.WHATSAPP_TOKEN = "mock_token"
     wa.WHATSAPP_PHONE_NUMBER_ID = "12345"
     wa.WHATSAPP_APPROVER_PHONE = "919999999999"
@@ -394,7 +395,7 @@ async def test_whatsapp_e2e_rejection_flow(mock_client_class, client, db_engine)
 async def test_whatsapp_e2e_modify_flow(mock_client_class, client, db_engine):
     # Setup WhatsApp mock config
     import app.whatsapp as wa
-    mainmod.WHATSAPP_APP_SECRET = "test_secret"
+    webhooksmod.WHATSAPP_APP_SECRET = "test_secret"
     wa.WHATSAPP_TOKEN = "mock_token"
     wa.WHATSAPP_PHONE_NUMBER_ID = "12345"
     wa.WHATSAPP_APPROVER_PHONE = "919999999999"
@@ -471,7 +472,7 @@ async def test_whatsapp_webhook_idempotency(mock_client_class, client, db_engine
     from app.models import Approval
     # Setup WhatsApp mock config
     import app.whatsapp as wa
-    mainmod.WHATSAPP_APP_SECRET = "test_secret"
+    webhooksmod.WHATSAPP_APP_SECRET = "test_secret"
     wa.WHATSAPP_TOKEN = "mock_token"
     wa.WHATSAPP_PHONE_NUMBER_ID = "12345"
     wa.WHATSAPP_APPROVER_PHONE = "919999999999"

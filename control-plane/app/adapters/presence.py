@@ -1,10 +1,13 @@
 import logging
+import os
+import json
+import uuid
 from typing import Optional
 import datetime as dt
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.kernel.optypes import OpSpec, PreviewArtifact, ExecResult, VerifyResult, Severity, Reversibility, Money
+from app.kernel.optypes import OpSpec, PreviewArtifact, ExecResult, VerifyResult, Severity, Reversibility, Money, OpState
 from app.kernel.loop import Adapter
 from app.models import BrandProperty, Connection
 from app.services.secrets import SecretManagerClient
@@ -152,6 +155,30 @@ class PresenceAdapter(Adapter):
                 severity=Severity(impact=1, reversibility=Reversibility.REVERSIBLE),
                 cost_estimate=Money(0)
             ))
+        if any(w in words for w in ["social", "instagram", "linkedin", "post", "copy"]):
+            ops.append(OpSpec(
+                tenant_id=tenant_id,
+                brand_id=brand_id,
+                domain=self.domain,
+                action="presence.social.post_draft",
+                params={
+                    "intent": intent,
+                },
+                severity=Severity(impact=1, reversibility=Reversibility.REVERSIBLE),
+                cost_estimate=Money(amount_minor=10000, currency="INR"),
+            ))
+        elif any(w in words for w in ["email", "campaign", "newsletter", "funnel"]):
+            ops.append(OpSpec(
+                tenant_id=tenant_id,
+                brand_id=brand_id,
+                domain=self.domain,
+                action="presence.email.campaign_audit",
+                params={
+                    "intent": intent,
+                },
+                severity=Severity(impact=2, reversibility=Reversibility.REVERSIBLE),
+                cost_estimate=Money(amount_minor=50000, currency="INR"),
+            ))
 
         return ops
 
@@ -187,9 +214,57 @@ class PresenceAdapter(Adapter):
             comps = ", ".join(op.params.get("competitors", []))
             summary = f"Will run Playwright citation audit for competitors: {comps}."
             return PreviewArtifact(kind="citation_audit_preview", summary=summary, detail=op.params)
-        elif op.action == "presence.alert_dispatch":
-            summary = f"Alert Dispatch: {op.params.get('alert_type')} ({op.params.get('severity')}) - {op.params.get('disapproved_products', 0)} disapproved items."
-            return PreviewArtifact(kind="summary", summary=summary, detail=op.params)
+        elif op.action == "presence.social.post_draft":
+            intent = op.params.get("intent", "")
+            insta_prof = self._load_profile("instagram_curator") or ""
+            link_prof = self._load_profile("linkedin_creator") or ""
+            system_instruction = f"{insta_prof}\n{link_prof}"
+            
+            try:
+                from app.services.llm import VertexAIClient
+                project_id = os.getenv("AOS_GCP_PROJECT")
+                llm_client = VertexAIClient(project_id=project_id)
+                drafts = llm_client.generate_social_content(intent, system_instruction)
+            except Exception as e:
+                return PreviewArtifact(kind="presence_error", summary=f"Failed to generate social content: {str(e)}", detail={})
+                
+            summary_md = (
+                f"# Social Media Draft Curation\n\n"
+                f"### 📸 Instagram Carousel Draft\n"
+                f"*   **Slide 1**: {drafts.get('instagram_carousel', {}).get('slide_1')}\n"
+                f"*   **Slide 2**: {drafts.get('instagram_carousel', {}).get('slide_2')}\n"
+                f"*   **Layout Note**: *\"{drafts.get('instagram_carousel', {}).get('visual_layout_spec')}\"*\n\n"
+                f"### 💼 LinkedIn Thought-Leadership Update\n"
+                f"{drafts.get('linkedin_post')}\n\n"
+                f"### 🖼️ Banner Stock Image Prompt\n"
+                f"*\"{drafts.get('image_prompt')}\"*\n"
+            )
+            return PreviewArtifact(kind="social_drafts", summary=summary_md, detail=drafts)
+            
+        elif op.action == "presence.email.campaign_audit":
+            intent = op.params.get("intent", "")
+            email_prof = self._load_profile("email_strategist") or ""
+            
+            try:
+                from app.services.llm import VertexAIClient
+                project_id = os.getenv("AOS_GCP_PROJECT")
+                llm_client = VertexAIClient(project_id=project_id)
+                report = llm_client.analyze_email_funnel(intent, email_prof)
+            except Exception as e:
+                return PreviewArtifact(kind="presence_error", summary=f"Failed to audit email funnel: {str(e)}", detail={})
+                
+            summary_md = (
+                f"# Email Funnel Audit Report\n\n"
+                f"*   **Overall Status**: {'✅ PASSED' if report.get('passed') else '❌ FAILED'}\n"
+                f"*   **CTR Index**: `{report.get('ctr_percent')}%` (Average: 2.5%)\n"
+                f"*   **Spam Deliverability Risk**: `{report.get('spam_risk_score')}/100` (Low is good)\n\n"
+                f"### 💡 Recommendations & Copy Corrections\n"
+            )
+            for s in report.get("redesign_suggestions", []):
+                summary_md += f"-  {s}\n"
+                
+            return PreviewArtifact(kind="email_audit", summary=summary_md, detail=report)
+
         return PreviewArtifact(kind="summary", summary="Unknown Presence Action", detail=op.params)
 
     async def execute(self, op: OpSpec, idem_key: str, session: Optional[AsyncSession] = None) -> ExecResult:
@@ -377,7 +452,6 @@ class PresenceAdapter(Adapter):
             resolved_disapproved = prop.findings.get("disapproved_products", 0)
             if resolved_disapproved > 0:
                 from app.kernel import loop
-                from app.kernel.optypes import Severity, Reversibility, Money, OpState
 
                 alert_op = OpSpec(
                     tenant_id=op.tenant_id,
@@ -420,7 +494,6 @@ class PresenceAdapter(Adapter):
 
             if HAS_PLAYWRIGHT:
                 try:
-                    import os
                     if os.getenv("AOS_ENV") == "test" or os.getenv("MOCK_PLAYWRIGHT") == "true":
                         if op.params.get("simulate_timeout"):
                             raise RuntimeError("Playwright Timeout Error (Simulated)")
@@ -465,10 +538,62 @@ class PresenceAdapter(Adapter):
 
             prop.status = "healthy" if len(citations) > 0 else "degraded"
             prop.last_checked = now
+            # AEO Audit Analysis using LLM
+            aeo_report = {}
+            
+            profile_path = os.path.join(os.path.dirname(__file__), "presence_profiles", "marketing-ai-citation-strategist.md")
+            system_instruction = None
+            if os.path.exists(profile_path):
+                try:
+                    with open(profile_path, "r", encoding="utf-8") as f:
+                        content = f.read()
+                    if content.startswith("---"):
+                        parts = content.split("---", 2)
+                        if len(parts) >= 3:
+                            content = parts[2].strip()
+                    system_instruction = content
+                except Exception as e:
+                    logger.warning(f"Failed to read AEO strategist profile: {e}")
+                    
+            if not system_instruction:
+                system_instruction = "You are an AI Engine Optimization (AEO) Citation Strategist. Analyze brand citations vs competitors."
+                
+            try:
+                from app.services.llm import VertexAIClient
+                project_id = os.getenv("AOS_GCP_PROJECT")
+                client = VertexAIClient(project_id=project_id)
+                citation_json = json.dumps(citations)
+                
+                aeo_report = client.analyze_citations(citation_json, system_instruction)
+                
+                # Propose build remediation if recommended
+                if aeo_report.get("propose_llms_txt") and aeo_report.get("llms_txt_content"):
+                    from app.kernel import loop
+                    build_op = OpSpec(
+                        tenant_id=op.tenant_id,
+                        brand_id=op.brand_id,
+                        domain="build",
+                        action="build.deliver",
+                        params={
+                            "intent": f"Create public/llms.txt with optimized AI description:\n\n{aeo_report['llms_txt_content']}",
+                            "branch_name": f"aos-aeo-llms-{uuid.uuid4().hex[:8]}",
+                            "repo": None,
+                            "capability": "seo_auditor_fixer"
+                        },
+                        severity=Severity(impact=1, reversibility=Reversibility.REVERSIBLE),
+                        cost_estimate=Money(amount_minor=100000, currency="INR"),
+                        parent_op_id=op.id
+                    )
+                    await loop.propose(session, build_op, actor="aeo_strategist")
+                    logger.info("Automatically proposed build.deliver Op to write llms.txt based on AEO recommendations.")
+            except Exception as e:
+                logger.error(f"Failed to perform AEO citation analysis: {e}")
+
             prop.findings = {
                 "citations": citations,
                 "keywords": keywords,
-                "audited_competitors_count": len(competitors)
+                "audited_competitors_count": len(competitors),
+                "aeo_report": aeo_report
             }
 
             return ExecResult(
@@ -477,6 +602,97 @@ class PresenceAdapter(Adapter):
                     "message": "Playwright citation audit completed",
                     "status": prop.status,
                     "findings": prop.findings
+                }
+            )
+
+        elif op.action == "presence.social.post_draft":
+            intent = op.params.get("intent", "")
+            insta_prof = self._load_profile("instagram_curator") or ""
+            link_prof = self._load_profile("linkedin_creator") or ""
+            system_instruction = f"{insta_prof}\n{link_prof}"
+            
+            try:
+                from app.services.llm import VertexAIClient
+                project_id = os.getenv("AOS_GCP_PROJECT")
+                llm_client = VertexAIClient(project_id=project_id)
+                drafts = llm_client.generate_social_content(intent, system_instruction)
+            except Exception as e:
+                logger.exception("Failed to generate social content")
+                return ExecResult(ok=False, detail={"error": f"Failed to generate social content: {str(e)}"})
+
+            stmt = select(BrandProperty).where(
+                BrandProperty.tenant_id == op.tenant_id,
+                BrandProperty.brand_id == op.brand_id,
+                BrandProperty.type == "social_content_drafts"
+            )
+            prop_res = await session.execute(stmt)
+            prop = prop_res.scalar_one_or_none()
+            
+            if not prop:
+                prop = BrandProperty(
+                    tenant_id=op.tenant_id,
+                    brand_id=op.brand_id,
+                    type="social_content_drafts",
+                    provider="mock-copywriter-agent",
+                    status="drafted",
+                    findings={}
+                )
+                session.add(prop)
+
+            prop.findings = drafts
+            prop.status = "drafted"
+            prop.last_checked = now
+
+            return ExecResult(
+                ok=True,
+                detail={
+                    "message": "Social media copy curated and saved.",
+                    "platforms_curated": ["instagram", "linkedin"]
+                }
+            )
+
+        elif op.action == "presence.email.campaign_audit":
+            intent = op.params.get("intent", "")
+            email_prof = self._load_profile("email_strategist") or ""
+            
+            try:
+                from app.services.llm import VertexAIClient
+                project_id = os.getenv("AOS_GCP_PROJECT")
+                llm_client = VertexAIClient(project_id=project_id)
+                report = llm_client.analyze_email_funnel(intent, email_prof)
+            except Exception as e:
+                logger.exception("Failed to audit email funnel")
+                return ExecResult(ok=False, detail={"error": f"Failed to audit email funnel: {str(e)}"})
+
+            stmt = select(BrandProperty).where(
+                BrandProperty.tenant_id == op.tenant_id,
+                BrandProperty.brand_id == op.brand_id,
+                BrandProperty.type == "email_marketing_audit"
+            )
+            prop_res = await session.execute(stmt)
+            prop = prop_res.scalar_one_or_none()
+            
+            if not prop:
+                prop = BrandProperty(
+                    tenant_id=op.tenant_id,
+                    brand_id=op.brand_id,
+                    type="email_marketing_audit",
+                    provider="mock-email-strategist",
+                    status="completed" if report["passed"] else "failed",
+                    findings={}
+                )
+                session.add(prop)
+
+            prop.findings = report
+            prop.status = "completed" if report["passed"] else "failed"
+            prop.last_checked = now
+
+            return ExecResult(
+                ok=report["passed"],
+                detail={
+                    "message": "Email campaign funnel audit completed",
+                    "spam_risk_score": report["spam_risk_score"],
+                    "passed": report["passed"]
                 }
             )
 
@@ -528,6 +744,10 @@ class PresenceAdapter(Adapter):
         elif op.action in ("presence.wordpress.disconnect", "presence.web.disconnect", "presence.google.disconnect"):
             return VerifyResult(ok=True, checks={"disconnected": True})
 
+        elif op.action == "presence.social.post_draft":
+            return VerifyResult(ok=True, checks={"social_drafts_completed": True})
+        elif op.action == "presence.email.campaign_audit":
+            return VerifyResult(ok=True, checks={"email_audit_completed": True})
         elif op.action == "presence.alert_dispatch":
             return VerifyResult(ok=True, checks={"alert_sent": True})
         return VerifyResult(ok=True, checks={"audit_run": True})
@@ -570,3 +790,39 @@ class PresenceAdapter(Adapter):
                 )
             ]
         return []
+
+    def _load_profile(self, capability_name: Optional[str]) -> Optional[str]:
+        if not capability_name:
+            return None
+            
+        mapping = {
+            "email_strategist": "marketing-email-strategist.md",
+            "instagram_curator": "marketing-instagram-curator.md",
+            "linkedin_creator": "marketing-linkedin-content-creator.md",
+            "aeo_foundations": "marketing-aeo-foundations.md",
+            "ai_citation_strategist": "marketing-ai-citation-strategist.md",
+        }
+        
+        profile_file = mapping.get(capability_name)
+        if not profile_file:
+            return None
+            
+        import os
+        profile_path = os.path.join(os.path.dirname(__file__), "presence_profiles", profile_file)
+        if not os.path.exists(profile_path):
+            logger.warning(f"Profile file not found at {profile_path}")
+            return None
+            
+        try:
+            with open(profile_path, "r", encoding="utf-8") as f:
+                content = f.read()
+                
+            # Strip YAML frontmatter if present
+            if content.startswith("---"):
+                parts = content.split("---", 2)
+                if len(parts) >= 3:
+                    content = parts[2].strip()
+            return content
+        except Exception as e:
+            logger.error(f"Failed to read profile {profile_file}: {e}")
+            return None

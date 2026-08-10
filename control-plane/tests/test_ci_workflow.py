@@ -75,3 +75,17 @@ def test_github_actions_ci_workflow():
     run_cmd = pytest_step.get("run", "")
     assert "pytest" in run_cmd
     assert "-q" not in run_cmd, "The quiet flag (-q) must be removed to output the full coverage table in CI logs!"
+
+
+def test_no_committed_db_files():
+    import subprocess
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+    try:
+        output = subprocess.check_output(["git", "ls-files"], cwd=repo_root).decode("utf-8")
+        files = output.splitlines()
+        db_files = [f for f in files if f.endswith(".db") or f.endswith(".sqlite")]
+        assert len(db_files) == 0, f"Found committed database files: {db_files}"
+    except subprocess.CalledProcessError:
+        # Pass if git CLI is not functional (e.g. running outside git checkout)
+        pass
+

@@ -15,6 +15,25 @@ class DRAdapter:
     """Automated database backup restore and verification drill adapter (§6.5)."""
     domain = "dr"
 
+    def __init__(self):
+        # Clean up orphan temporary database files from crashed/cancelled runs
+        try:
+            import time
+            import glob
+            temp_dir = tempfile.gettempdir()
+            pattern = os.path.join(temp_dir, "scratch_restore_*.db")
+            now = time.time()
+            for filepath in glob.glob(pattern):
+                # If file is older than 5 minutes (300 seconds), delete it
+                try:
+                    if now - os.path.getmtime(filepath) > 300:
+                        os.unlink(filepath)
+                        logger.info(f"Cleaned up orphan temporary DR database: {filepath}")
+                except OSError:
+                    pass
+        except Exception as e:
+            logger.warning(f"Failed to clean up orphan DR database files during initialization: {e}")
+
     def plan(self, intent: str, tenant_id: str, brand_id: str) -> list[OpSpec]:
         normalized = intent.lower()
         if "verify dr" in normalized or "run dr drill" in normalized or "database restore verify" in normalized:

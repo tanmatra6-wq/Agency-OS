@@ -3,11 +3,14 @@ from app.observability import trace_context
 from fastapi import Request, status
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
+import os
+import time
 import uuid
+import time
 
 from app.database import AsyncSessionLocal
 from app.models import Tenant
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 
 class TraceMiddleware(BaseHTTPMiddleware):
@@ -40,8 +43,48 @@ class TraceMiddleware(BaseHTTPMiddleware):
 
 
 
-# Thread-safe memory cache mapping tenant_id -> is_active (bool) to ensure zero-latency fast-paths
-VALID_TENANTS_CACHE: dict[str, bool] = {}
+class _TTLTenantCache:
+  """Dict-like cache of tenant_id -> is_active with a per-entry TTL.
+
+  The old plain-dict cache never expired, so a tenant suspended/deleted on one
+  Cloud Run instance stayed cached as active in every OTHER instance's memory
+  until that instance restarted. Bounding each entry with a TTL forces every
+  instance to re-validate against the DB within TENANT_CACHE_TTL_SECONDS, while
+  preserving the zero-latency fast path within the window. Drop-in for the dict
+  API the call sites already use (item get/set, `in`, pop, clear).
+  """
+
+  def __init__(self, ttl_seconds: float):
+    self._ttl = ttl_seconds
+    self._d: dict[str, tuple[bool, float]] = {}
+
+  def __setitem__(self, key: str, value: bool) -> None:
+    self._d[key] = (value, time.monotonic())
+
+  def __contains__(self, key: str) -> bool:
+    entry = self._d.get(key)
+    if entry is None:
+      return False
+    if time.monotonic() - entry[1] > self._ttl:
+      self._d.pop(key, None)  # lazily evict on read
+      return False
+    return True
+
+  def __getitem__(self, key: str) -> bool:
+    return self._d[key][0]
+
+  def pop(self, key: str, default=None):
+    entry = self._d.pop(key, None)
+    return default if entry is None else entry[0]
+
+  def clear(self) -> None:
+    self._d.clear()
+
+
+# Memory cache mapping tenant_id -> is_active (bool) for a zero-latency fast-path,
+# bounded by TTL so suspensions/deletions propagate across instances.
+TENANT_CACHE_TTL_SECONDS = float(os.getenv("TENANT_CACHE_TTL_SECONDS", "60"))
+VALID_TENANTS_CACHE = _TTLTenantCache(TENANT_CACHE_TTL_SECONDS)
 
 
 class TenantIsolationMiddleware(BaseHTTPMiddleware):
@@ -57,7 +100,7 @@ class TenantIsolationMiddleware(BaseHTTPMiddleware):
     if (request.url.path.startswith("/webhooks/plugins/") or 
         request.url.path.startswith("/api/v1/onboarding") or
         request.url.path.startswith("/tenants") or 
-        request.url.path in ["/healthz", "/readyz", "/health", "/docs", "/openapi.json", "/audit/verify", "/tasks/drain-outbox", "/webhooks/whatsapp", "/tasks/trust-snapshots", "/tasks/process-cadences", "/tasks/evaluate-trust", "/tasks/calibrate-attribution", "/dashboard", "/metrics", "/tasks/refresh-tokens", "/tasks/drift-detect", "/tasks/run-diagnostics", "/connections/oauth/callback"]):
+        request.url.path in ["/healthz", "/readyz", "/health", "/docs", "/openapi.json", "/audit/verify", "/tasks/drain-outbox", "/webhooks/whatsapp", "/tasks/trust-snapshots", "/tasks/process-cadences", "/tasks/evaluate-trust", "/tasks/calibrate-attribution", "/dashboard", "/metrics", "/tasks/refresh-tokens", "/tasks/drift-detect", "/tasks/run-diagnostics", "/connections/oauth/callback", "/session/bootstrap"]):
       return await call_next(request)
 
     if not tenant_id:
@@ -68,7 +111,6 @@ class TenantIsolationMiddleware(BaseHTTPMiddleware):
 
     # --- SECURE TENANT VALIDATION ---
     bypass_validation = getattr(request.app.state, "bypass_tenant_validation", False)
-    # 1. Fast path: check local memory cache
     if not bypass_validation:
       if tenant_id in VALID_TENANTS_CACHE:
         if not VALID_TENANTS_CACHE[tenant_id]:
@@ -81,6 +123,13 @@ class TenantIsolationMiddleware(BaseHTTPMiddleware):
         try:
           session_maker = getattr(request.app.state, "db_session_maker", AsyncSessionLocal)
           async with session_maker() as session:
+            # Set the GUC to tenant_id before querying tenants table, so RLS policy
+            # (id = current_setting('app.current_tenant_id')) evaluates to True for this tenant.
+            if session.bind.dialect.name == "postgresql":
+              await session.execute(
+                  text("SELECT set_config('app.current_tenant_id', :tenant_id, true)"),
+                  {"tenant_id": tenant_id},
+              )
             stmt = select(Tenant.id, Tenant.is_active).where(Tenant.id == tenant_id)
             res = await session.execute(stmt)
             row = res.first()
@@ -93,7 +142,7 @@ class TenantIsolationMiddleware(BaseHTTPMiddleware):
             
             db_tenant_id, is_active = row
             
-            # Cache the verified tenant status for future fast-paths
+            # Cache the verified tenant status
             VALID_TENANTS_CACHE[tenant_id] = is_active
             
             if not is_active:
@@ -142,8 +191,8 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     self.buckets = app._rate_limit_buckets
 
   async def dispatch(self, request, call_next):
-    # Rate limit POST /chat and public webhooks
-    rate_limited_paths = ["/chat", "/webhooks/whatsapp", "/tenants", "/intents", "/actions", "/policy-simulate"]
+    # Rate limit POST /chat, public webhooks, and onboarding bootstrap
+    rate_limited_paths = ["/chat", "/webhooks/whatsapp", "/tenants", "/intents", "/actions", "/policy-simulate", "/api/v1/onboarding/bootstrap"]
     if request.method == "POST" and request.url.path in rate_limited_paths:
       client_ip = request.client.host if request.client else "unknown"
       now = self.time.time()

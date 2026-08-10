@@ -9,6 +9,28 @@ logger = logging.getLogger(__name__)
 
 class ShopifyStorefront(IStorefrontAdapter):
     """Production-grade Shopify storefront adapter implementing the IStorefrontAdapter interface."""
+
+    _mock_products = [
+        {
+            "sku": "AOS-T-SHIRT-M",
+            "title": "AOS Premium T-Shirt (Medium)",
+            "current_price": 799,
+            "cost": 300,
+            "competitor_price": 999
+        }
+    ]
+
+    @classmethod
+    def reset_mock(cls):
+        cls._mock_products = [
+            {
+                "sku": "AOS-T-SHIRT-M",
+                "title": "AOS Premium T-Shirt (Medium)",
+                "current_price": 799,
+                "cost": 300,
+                "competitor_price": 999
+            }
+        ]
     
     def __init__(self, shop_url: str, token: str):
         self.shop_url = shop_url.strip().rstrip("/")
@@ -220,6 +242,70 @@ class ShopifyStorefront(IStorefrontAdapter):
             return {"success": True, "status": "ALREADY_EXISTS"}
         else:
             return {"success": False, "error": res.get("error")}
+            
+    async def get_products_with_costs(self) -> list[dict]:
+        """Retrieves products list with SKU, price, and supply cost."""
+        if self._is_mock_mode():
+            logger.info("[MOCK] Fetching Shopify products with costs")
+            return self._mock_products
+        res = self._make_request("products.json?limit=50")
+        if "error" in res:
+            logger.error(f"Shopify products fetch failed: {res['error']}")
+            return []
+            
+        products = res.get("products", [])
+        out = []
+        for p in products:
+            title = p.get("title")
+            for v in p.get("variants", []):
+                sku = v.get("sku")
+                if not sku:
+                    continue
+                price = int(float(v.get("price", 0)))
+                cost = int(price * 0.4)
+                out.append({
+                    "sku": sku,
+                    "title": f"{title} - {v.get('title')}",
+                    "current_price": price,
+                    "cost": cost,
+                    "competitor_price": int(price * 1.2)
+                })
+        return out
+
+    async def update_product_price(self, sku: str, new_price: int) -> bool:
+        """Updates the price of a variant by SKU."""
+        if self._is_mock_mode():
+            logger.info(f"[MOCK] Updating price for SKU {sku} to {new_price}")
+            for p in self._mock_products:
+                if p.get("sku") == sku:
+                    p["current_price"] = new_price
+            return True
+            
+        res = self._make_request("products.json?limit=50")
+        if "error" in res:
+            return False
+            
+        variant_id = None
+        for p in res.get("products", []):
+            for v in p.get("variants", []):
+                if v.get("sku") == sku:
+                    variant_id = v.get("id")
+                    break
+            if variant_id:
+                break
+                
+        if not variant_id:
+            logger.error(f"Variant with SKU {sku} not found on Shopify")
+            return False
+            
+        payload = {
+            "variant": {
+                "id": variant_id,
+                "price": str(new_price)
+            }
+        }
+        update_res = self._make_request(f"variants/{variant_id}.json", method="PUT", payload=payload)
+        return "variant" in update_res
             
 # Retain MockShopifyClient alias for legacy compatibility
 MockShopifyClient = ShopifyStorefront

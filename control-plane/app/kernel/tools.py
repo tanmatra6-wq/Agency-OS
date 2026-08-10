@@ -323,52 +323,52 @@ registry.register_tool(
 # already live) + config; each creates a GOVERNED Connection Op via the adapter
 # (propose -> gate -> approve -> audit), never a raw-credential DB write.
 
-def _grow_google_ads_connect_handler(tenant_id: str, brand_id: str, secret_ref: str) -> list[OpSpec]:
+def _grow_google_ads_connect_handler(tenant_id: str, brand_id: str, credential: str) -> list[OpSpec]:
     return [OpSpec(
         tenant_id=tenant_id, brand_id=brand_id, domain="grow",
         action="grow.google.connect",
-        params={"provider": "google-ads", "secret_ref": secret_ref, "config": {}},
+        params={"provider": "google-ads", "credential": credential, "config": {}},
         severity=Severity(impact=1, reversibility=Reversibility.COMPENSATABLE),
     )]
 
 
-def _grow_meta_connect_handler(tenant_id: str, brand_id: str, secret_ref: str) -> list[OpSpec]:
+def _grow_meta_connect_handler(tenant_id: str, brand_id: str, credential: str) -> list[OpSpec]:
     return [OpSpec(
         tenant_id=tenant_id, brand_id=brand_id, domain="grow",
         action="grow.meta.connect",
-        params={"provider": "meta-ads", "secret_ref": secret_ref, "config": {}},
+        params={"provider": "meta-ads", "credential": credential, "config": {}},
         severity=Severity(impact=1, reversibility=Reversibility.COMPENSATABLE),
     )]
 
 
-def _presence_google_connect_handler(tenant_id: str, brand_id: str, secret_ref: str) -> list[OpSpec]:
+def _presence_google_connect_handler(tenant_id: str, brand_id: str, credential: str) -> list[OpSpec]:
     return [OpSpec(
         tenant_id=tenant_id, brand_id=brand_id, domain="presence",
         action="presence.google.connect",
-        params={"provider": "google", "secret_ref": secret_ref, "config": {}},
+        params={"provider": "google", "credential": credential, "config": {}},
         severity=Severity(impact=1, reversibility=Reversibility.COMPENSATABLE),
     )]
 
 
-def _presence_wordpress_connect_handler(tenant_id: str, brand_id: str, secret_ref: str, url: str) -> list[OpSpec]:
+def _presence_wordpress_connect_handler(tenant_id: str, brand_id: str, credential: str, url: str) -> list[OpSpec]:
     return [OpSpec(
         tenant_id=tenant_id, brand_id=brand_id, domain="presence",
         action="presence.wordpress.connect",
-        params={"provider": "wordpress", "secret_ref": secret_ref, "config": {"url": url}},
+        params={"provider": "wordpress", "credential": credential, "config": {"url": url}},
         severity=Severity(impact=1, reversibility=Reversibility.COMPENSATABLE),
     )]
 
 
-def _presence_web_connect_handler(tenant_id: str, brand_id: str, secret_ref: str, url: str) -> list[OpSpec]:
+def _presence_web_connect_handler(tenant_id: str, brand_id: str, credential: str, url: str) -> list[OpSpec]:
     return [OpSpec(
         tenant_id=tenant_id, brand_id=brand_id, domain="presence",
         action="presence.web.connect",
-        params={"provider": "web", "secret_ref": secret_ref, "config": {"url": url}},
+        params={"provider": "web", "credential": credential, "config": {"url": url}},
         severity=Severity(impact=1, reversibility=Reversibility.COMPENSATABLE),
     )]
 
 
-_SECRET_REF_PROP = {"type": "STRING", "description": "Secret Manager secret name holding the provider API credentials"}
+_CREDENTIAL_PROP = {"type": "STRING", "description": "Secret Manager reference for the API token"}
 
 registry.register_tool(
     name="grow_google_ads_connect",
@@ -377,7 +377,7 @@ registry.register_tool(
         "title": "Connect Google Ads",
         "description": "Connect a Google Ads account.",
         "domain": "grow",
-        "parameters": {"type": "OBJECT", "properties": {"secret_ref": _SECRET_REF_PROP}, "required": ["secret_ref"]},
+        "parameters": {"type": "OBJECT", "properties": {"credential": _CREDENTIAL_PROP}, "required": ["credential"]},
     },
     handler=_grow_google_ads_connect_handler,
 )
@@ -389,7 +389,7 @@ registry.register_tool(
         "title": "Connect Meta Ads",
         "description": "Connect a Meta (Facebook/Instagram) Ads account.",
         "domain": "grow",
-        "parameters": {"type": "OBJECT", "properties": {"secret_ref": _SECRET_REF_PROP}, "required": ["secret_ref"]},
+        "parameters": {"type": "OBJECT", "properties": {"credential": _CREDENTIAL_PROP}, "required": ["credential"]},
     },
     handler=_grow_meta_connect_handler,
 )
@@ -401,7 +401,7 @@ registry.register_tool(
         "title": "Connect Google Search Console",
         "description": "Connect Google Search Console & Merchant Center.",
         "domain": "presence",
-        "parameters": {"type": "OBJECT", "properties": {"secret_ref": _SECRET_REF_PROP}, "required": ["secret_ref"]},
+        "parameters": {"type": "OBJECT", "properties": {"credential": _CREDENTIAL_PROP}, "required": ["credential"]},
     },
     handler=_presence_google_connect_handler,
 )
@@ -415,8 +415,8 @@ registry.register_tool(
         "domain": "presence",
         "parameters": {
             "type": "OBJECT",
-            "properties": {"url": {"type": "STRING", "description": "WordPress site URL"}, "secret_ref": _SECRET_REF_PROP},
-            "required": ["url", "secret_ref"],
+            "properties": {"url": {"type": "STRING", "description": "WordPress site URL"}, "credential": _CREDENTIAL_PROP},
+            "required": ["url", "credential"],
         },
     },
     handler=_presence_wordpress_connect_handler,
@@ -431,8 +431,8 @@ registry.register_tool(
         "domain": "presence",
         "parameters": {
             "type": "OBJECT",
-            "properties": {"url": {"type": "STRING", "description": "Website URL"}, "secret_ref": _SECRET_REF_PROP},
-            "required": ["url", "secret_ref"],
+            "properties": {"url": {"type": "STRING", "description": "Website URL"}, "credential": _CREDENTIAL_PROP},
+            "required": ["url", "credential"],
         },
     },
     handler=_presence_web_connect_handler,

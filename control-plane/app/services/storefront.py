@@ -20,6 +20,16 @@ class IStorefrontAdapter(ABC):
         """Registers purchase/fulfillment webhooks pointing to the sGTM tracking gateway."""
         pass
 
+    @abstractmethod
+    async def get_products_with_costs(self) -> list[dict]:
+        """Retrieves products list with SKU, price, and supply cost."""
+        pass
+
+    @abstractmethod
+    async def update_product_price(self, sku: str, new_price: int) -> bool:
+        """Updates the price of a variant by SKU."""
+        pass
+
 
 def get_storefront_client(provider: str = "shopify", shop_url: str = "", token: Optional[str] = None) -> IStorefrontAdapter:
     """Factory resolving a storefront adapter for a provider.

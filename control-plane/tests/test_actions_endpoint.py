@@ -44,7 +44,7 @@ async def test_actions_connect_is_governed(client):
     r = await client.post(
         "/actions",
         headers={"X-Tenant-ID": tid},
-        json={"tool": "grow_google_ads_connect", "brand_id": bid, "params": {"secret_ref": "google-ads-token"}},
+        json={"tool": "grow_google_ads_connect", "brand_id": bid, "params": {"credential": "google-ads-token"}},
     )
     assert r.status_code == 200, r.text
     assert r.json()["cards"][0]["action"] == "grow.google.connect"

@@ -190,3 +190,85 @@ async def test_citation_audit_rls_cross_tenant_denied(client, db_engine):
             assert "RLS Violation" in str(exc_info.value)
     finally:
         tenant_context.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_aeo_citation_audit_flow(client, db_engine):
+    async_session = async_sessionmaker(db_engine, expire_on_commit=False)
+
+    # 1. Bootstrap Tenant, Brand and active Repository connection
+    async with async_session() as s:
+        tenant = Tenant(name="AEO Tenant", hosting_tier="shared")
+        s.add(tenant)
+        await s.commit()
+        tenant_id = tenant.id
+
+        brand = Brand(tenant_id=tenant_id, name="Tanmatra AEO")
+        s.add(brand)
+        await s.commit()
+        brand_id = brand.id
+        
+        # Seed active repository connection so that auto-remediation Build Op proposing succeeds
+        repo_prop = BrandProperty(
+            tenant_id=tenant_id,
+            brand_id=brand_id,
+            type="repository",
+            provider="git",
+            status="active",
+            findings={"repo_url": "git@github.com:tanmatra/aeo-site.git"}
+        )
+        s.add(repo_prop)
+        await s.commit()
+
+    H = {"X-Tenant-ID": tenant_id}
+
+    # 2. Submit citation audit intent
+    resp = await client.post("/intents", headers=H, json={
+        "domain": "presence",
+        "brand_id": brand_id,
+        "text": "run competitor citation audit for rival-a.com"
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    op_id = data["cards"][0]["op_id"]
+
+    # 3. Approve the audit Op
+    resp_dec = await client.post(f"/ops/{op_id}/decision", headers=H, json={
+        "decision": "approve",
+        "actor": "chandan",
+        "role": "owner",
+        "surface": "whatsapp"
+    })
+    assert resp_dec.status_code == 200
+
+    # Background tasks are automatically processed by test client during the request lifecycle.
+
+    # 5. Verify the audit findings in DB have the AEO report
+    async with async_session() as s:
+        stmt = select(BrandProperty).where(
+            BrandProperty.tenant_id == tenant_id,
+            BrandProperty.brand_id == brand_id,
+            BrandProperty.type == "citation_audit"
+        )
+        res = await s.execute(stmt)
+        prop = res.scalar_one()
+        assert prop.findings["aeo_report"] is not None
+        assert "Mock Gap Analysis" in prop.findings["aeo_report"]["gap_analysis"]
+
+        # 6. Verify that a build.deliver Op was automatically proposed
+        stmt_ops = select(OpRow).where(
+            OpRow.tenant_id == tenant_id,
+            OpRow.brand_id == brand_id,
+            OpRow.domain == "build",
+            OpRow.action == "build.deliver",
+            OpRow.parent_op_id == op_id
+        )
+        res_ops = await s.execute(stmt_ops)
+        proposed_build_ops = res_ops.scalars().all()
+        assert len(proposed_build_ops) == 1
+        
+        build_op = proposed_build_ops[0]
+        assert build_op.state == "PROPOSED"
+        assert build_op.params["repo"] == "git@github.com:tanmatra/aeo-site.git"
+        assert "Create public/llms.txt" in build_op.params["intent"]
+        assert build_op.params["capability"] == "seo_auditor_fixer"

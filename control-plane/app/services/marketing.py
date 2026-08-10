@@ -39,6 +39,15 @@ class MarketingClient(Protocol):
     async def bootstrap_offline_conversions(self) -> dict:
         ...
 
+    async def create_audience(self, name: str, lookalike_params: dict) -> dict:
+        ...
+
+    async def update_keyword_bid_strategy(self, campaign_id: str, strategy_type: str, value: float) -> bool:
+        ...
+
+    async def audit_creatives(self, campaign_id: str) -> list[dict]:
+        ...
+
 
 def get_marketing_client(provider: str, token: Optional[str] = None, config: Optional[dict] = None) -> MarketingClient:
     """Factory to resolve the active marketing client for a provider."""
@@ -195,3 +204,23 @@ class MockMarketingClient:
             "name": "AgencyOS CRM Lead Conversion",
             "status": "CREATED_MOCK",
         }
+
+    async def create_audience(self, name: str, lookalike_params: dict) -> dict:
+        logger.info(f"[MOCK] Created audience {name} with parameters {lookalike_params}")
+        return {
+            "success": True,
+            "audience_id": "mock-audience-99999",
+            "name": name,
+            "status": "ACTIVE"
+        }
+
+    async def update_keyword_bid_strategy(self, campaign_id: str, strategy_type: str, value: float) -> bool:
+        logger.info(f"[MOCK] Updated keyword bid strategy on campaign {campaign_id} to {strategy_type} with value {value}")
+        return True
+
+    async def audit_creatives(self, campaign_id: str) -> list[dict]:
+        logger.info(f"[MOCK] Auditing creatives for campaign {campaign_id}")
+        return [
+            {"creative_id": "c1", "headline": "Buy Now!", "ctr": 0.05, "status": "GOOD"},
+            {"creative_id": "c2", "headline": "Cheap Deals", "ctr": 0.005, "status": "UNDERPERFORMING"}
+        ]
