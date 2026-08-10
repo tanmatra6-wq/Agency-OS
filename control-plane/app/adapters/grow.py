@@ -32,93 +32,6 @@ class GrowAdapter(Adapter):
         words = normalized.split()
         raw_words = intent.strip().split()  # case-preserving, for URLs and GTM-XXXX ids
 
-        # --- High-priority new operations matching ---
-        if "audience" in words and ("create" in words or "creation" in words or "lookalike" in words):
-            # Parse audience name: look for word after "audience" or "name"
-            audience_name = "custom-lookalike-audience"
-            for idx, w in enumerate(words):
-                if w in ("audience", "name") and idx + 1 < len(words) and words[idx+1] not in ("create", "creation", "lookalike"):
-                    audience_name = raw_words[idx+1]
-                    break
-            # Parse lookalike percentage if any (e.g. "lookalike 1%")
-            lookalike_val = "1%"
-            for idx, w in enumerate(words):
-                if w == "lookalike" and idx + 1 < len(words):
-                    lookalike_val = raw_words[idx+1]
-            return [
-                OpSpec(
-                    tenant_id=tenant_id,
-                    brand_id=brand_id,
-                    domain=self.domain,
-                    action="grow.audience.create",
-                    params={
-                        "audience_name": audience_name,
-                        "lookalike_params": {"ratio": lookalike_val, "country": "IN"},
-                        "provider": "google-ads"
-                    },
-                    severity=Severity(impact=2, reversibility=Reversibility.REVERSIBLE),
-                    cost_estimate=Money(amount_minor=0, currency="INR")
-                )
-            ]
-
-        if "keyword" in words and "bid" in words and "strategy" in words:
-            # Parse strategy: look for "target_cpc" or "target_roas"
-            strategy_type = "target_cpc"
-            if "roas" in normalized:
-                strategy_type = "target_roas"
-            # Parse campaign_id
-            campaign_id = "camp-default"
-            for w in words:
-                if w.startswith("camp-"):
-                    campaign_id = w
-                    break
-            # Parse strategy value: look for number after strategy type or "value"
-            val = 5.0
-            for idx, w in enumerate(words):
-                if w in ("cpc", "roas", "value") and idx + 1 < len(words):
-                    try:
-                        val = float(words[idx+1])
-                    except ValueError:
-                        pass
-            return [
-                OpSpec(
-                    tenant_id=tenant_id,
-                    brand_id=brand_id,
-                    domain=self.domain,
-                    action="grow.strategy.keyword_bid",
-                    params={
-                        "campaign_id": campaign_id,
-                        "strategy_type": strategy_type,
-                        "value": val,
-                        "provider": "google-ads"
-                    },
-                    severity=Severity(impact=2, reversibility=Reversibility.REVERSIBLE),
-                    cost_estimate=Money(amount_minor=0, currency="INR")
-                )
-            ]
-
-        if "creative" in words and ("audit" in words or "performance" in words):
-            campaign_id = "camp-default"
-            for w in words:
-                if w.startswith("camp-"):
-                    campaign_id = w
-                    break
-            return [
-                OpSpec(
-                    tenant_id=tenant_id,
-                    brand_id=brand_id,
-                    domain=self.domain,
-                    action="grow.audit.creative",
-                    params={
-                        "campaign_id": campaign_id,
-                        "provider": "google-ads"
-                    },
-                    severity=Severity(impact=1, reversibility=Reversibility.REVERSIBLE),
-                    statutory=False,
-                    cost_estimate=Money(amount_minor=0, currency="INR")
-                )
-            ]
-
         # --- Omnichannel tracking automation (CRM POAS bootstrap + GTM hygiene) ---
         if ("bootstrap" in words and any(w in words for w in ("conversion", "conversions", "poas"))) \
                 or ("poas" in words and any(w in words for w in ("activate", "enable", "setup"))):
@@ -203,19 +116,6 @@ class GrowAdapter(Adapter):
                     cost_estimate=Money(0)
                 )
             ]
-        
-        if any(w in words for w in ("margin", "price", "pricing")) and any(w in words for w in ("audit", "analyze", "check")):
-            return [
-                OpSpec(
-                    tenant_id=tenant_id,
-                    brand_id=brand_id,
-                    domain=self.domain,
-                    action="grow.storefront.margin_pricing_audit",
-                    params={"provider": "shopify"},
-                    severity=Severity(impact=1, reversibility=Reversibility.REVERSIBLE),
-                    cost_estimate=Money(0)
-                )
-            ]
 
         if "webhook" in words and any(w in words for w in ("register", "poas", "sgtm")):
             gateway_url = next((w for w in raw_words if w.startswith("http://") or w.startswith("https://")), None)
@@ -267,32 +167,6 @@ class GrowAdapter(Adapter):
                         "provider": "google-ads"
                     },
                     severity=Severity(impact=1, reversibility=Reversibility.COMPENSATABLE),
-                    cost_estimate=Money(0)
-                )
-            ]
-
-        if any(w in words for w in ("campaign", "campaigns", "ppc")) and any(w in words for w in ("audit", "performance", "analyze")):
-            return [
-                OpSpec(
-                    tenant_id=tenant_id,
-                    brand_id=brand_id,
-                    domain=self.domain,
-                    action="grow.campaign.performance_audit",
-                    params={"provider": "google-ads"},
-                    severity=Severity(impact=1, reversibility=Reversibility.REVERSIBLE),
-                    cost_estimate=Money(0)
-                )
-            ]
-
-        if ("pipeline" in words and "audit" in words) or (all(w in words for w in ("sales", "crm")) and "audit" in words):
-            return [
-                OpSpec(
-                    tenant_id=tenant_id,
-                    brand_id=brand_id,
-                    domain=self.domain,
-                    action="grow.crm.pipeline_audit",
-                    params={"provider": "hubspot"},
-                    severity=Severity(impact=1, reversibility=Reversibility.REVERSIBLE),
                     cost_estimate=Money(0)
                 )
             ]
@@ -595,36 +469,6 @@ class GrowAdapter(Adapter):
 
         return []
 
-    def _load_profile(self, capability_name: Optional[str]) -> Optional[str]:
-        if not capability_name:
-            return None
-            
-        mapping = {
-            "pricing_analyst": "specialized-pricing-analyst.md",
-            "ppc_strategist": "paid-media-ppc-strategist.md",
-            "sales_pipeline_analyst": "sales-pipeline-analyst.md",
-        }
-        
-        profile_file = mapping.get(capability_name)
-        if not profile_file:
-            return None
-            
-        profile_path = os.path.join(
-            os.path.dirname(__file__),
-            "grow_profiles",
-            profile_file
-        )
-        if not os.path.exists(profile_path):
-            logger.warning(f"Grow profile not found at path: {profile_path}")
-            return None
-            
-        try:
-            with open(profile_path, "r", encoding="utf-8") as f:
-                return f.read()
-        except Exception as e:
-            logger.error(f"Failed to read grow profile {profile_file}: {e}")
-            return None
-
     def preview(self, op: OpSpec) -> PreviewArtifact:
         """Generates preview for growth actions."""
         if op.action == "grow.google.connect":
@@ -729,36 +573,6 @@ class GrowAdapter(Adapter):
             gateway = op.params.get("gateway_url") or "(sGTM gateway)"
             summary = f"Will register Shopify order webhooks pointing to the POAS/sGTM tracking gateway: {gateway}"
             return PreviewArtifact(kind="storefront_webhook_preview", summary=summary, detail=op.params)
-        elif op.action == "grow.audience.create":
-            name = op.params.get("audience_name")
-            ratio = op.params.get("lookalike_params", {}).get("ratio", "1%")
-            summary = f"Will create custom audience: {name}\nLookalike Ratio: {ratio}\nPlatform: Google Ads"
-            return PreviewArtifact(kind="audience_create_preview", summary=summary, detail=op.params)
-        elif op.action == "grow.strategy.keyword_bid":
-            campaign_id = op.params.get("campaign_id")
-            strategy = op.params.get("strategy_type")
-            val = op.params.get("value")
-            summary = f"Will set keyword bid strategy on campaign {campaign_id}\nStrategy Type: {strategy}\nValue: {val}"
-            return PreviewArtifact(kind="strategy_keyword_bid_preview", summary=summary, detail=op.params)
-        elif op.action == "grow.audit.creative":
-            campaign_id = op.params.get("campaign_id")
-            summary = f"Will run a creative performance audit on campaign {campaign_id} to identify underperforming ads."
-            return PreviewArtifact(kind="audit_creative_preview", summary=summary, detail=op.params)
-        elif op.action == "grow.storefront.margin_pricing_audit":
-            summary = "Will audit Shopify product prices against competitor price signals to propose margin optimizations."
-            return PreviewArtifact(kind="margin_pricing_audit_preview", summary=summary, detail=op.params)
-        elif op.action == "grow.storefront.update_price":
-            sku = op.params.get("sku")
-            price = op.params.get("new_price")
-            reason = op.params.get("reason", "manual update")
-            summary = f"Will update SKU {sku} price to {price} INR in Shopify storefront.\nReason: {reason}"
-            return PreviewArtifact(kind="storefront_update_price_preview", summary=summary, detail=op.params)
-        elif op.action == "grow.crm.pipeline_audit":
-            summary = "Will audit CRM sales pipeline deals, conversion metrics, and identify friction bottlenecks."
-            return PreviewArtifact(kind="crm_pipeline_audit_preview", summary=summary, detail=op.params)
-        elif op.action == "grow.campaign.performance_audit":
-            summary = "Will run a PPC Strategist analysis across all active campaigns to identify underperforming metrics and propose bid adjustments/pauses."
-            return PreviewArtifact(kind="ppc_performance_audit_preview", summary=summary, detail=op.params)
         return PreviewArtifact(kind="unknown_preview", summary="Unknown action", detail={})
 
     async def execute(self, op: OpSpec, idem_key: str, session: Optional[AsyncSession] = None) -> ExecResult:
@@ -818,13 +632,7 @@ class GrowAdapter(Adapter):
                 return ExecResult(ok=False, detail={"error": "Credential or secret_ref is required and cannot be empty or whitespace-only."})
             
             secret_id = f"{op.tenant_id}-{op.brand_id}-{provider}-secret"
-            from app.models import Tenant
-            stmt_tenant = select(Tenant).where(Tenant.id == op.tenant_id)
-            res_tenant = await session.execute(stmt_tenant)
-            tenant = res_tenant.scalar_one_or_none()
-            gcp_project = tenant.gcp_project if tenant else None
-
-            secrets_client = SecretManagerClient(project_id=gcp_project)
+            secrets_client = SecretManagerClient()
             credential_ref = await secrets_client.write_secret(secret_id, raw_token)
             
             logger.info(f"Connecting {provider} for brand {op.brand_id} with credential reference {credential_ref}")
@@ -880,7 +688,11 @@ class GrowAdapter(Adapter):
                 gcp_project = tenant.gcp_project if tenant else None
 
                 secrets_client = SecretManagerClient(project_id=gcp_project)
-                await secrets_client.delete_secret(conn.credential)
+                try:
+                    await secrets_client.delete_secret(conn.credential)
+                except Exception as e:
+                    logger.error(f"Failed to delete marketing secret from Secret Manager: {e}")
+                    raise RuntimeError(f"Failed to delete marketing secret from Secret Manager: {e}") from e
                 
             stmt_del = delete(Connection).where(
                 Connection.tenant_id == op.tenant_id,
@@ -902,8 +714,6 @@ class GrowAdapter(Adapter):
             "grow.storefront.catalog_audit",
             "grow.storefront.sales_analysis",
             "grow.storefront.register_poas_webhooks",
-            "grow.storefront.margin_pricing_audit",
-            "grow.storefront.update_price",
         ):
             return await self._execute_storefront_op(op, session)
 
@@ -1012,44 +822,6 @@ class GrowAdapter(Adapter):
                 return ExecResult(ok=True, detail={"message": f"Campaign {campaign_id} deleted"})
             return ExecResult(ok=False, detail={"error": f"Failed to delete campaign {campaign_id}"})
             
-        elif op.action == "grow.budget.reallocate":
-            src = op.params.get("source_campaign_id")
-            tgt = op.params.get("target_campaign_id")
-            amount = op.params.get("transfer_amount_minor")
-            
-            if not src or not tgt or not amount:
-                return ExecResult(ok=False, detail={"error": "Missing source, target, or amount"})
-                
-            src_camp = await client.get_campaign(src)
-            tgt_camp = await client.get_campaign(tgt)
-            
-            if not src_camp or not tgt_camp:
-                return ExecResult(ok=False, detail={"error": f"Source ({src}) or target ({tgt}) campaign not found"})
-                
-            src_budget = src_camp.get("budget_minor", 0)
-            tgt_budget = tgt_camp.get("budget_minor", 0)
-            
-            if src_budget < amount:
-                return ExecResult(ok=False, detail={"error": f"Source campaign has insufficient budget: {src_budget} < {amount}"})
-                
-            ok1 = await client.update_campaign(src, budget_minor=src_budget - amount)
-            ok2 = await client.update_campaign(tgt, budget_minor=tgt_budget + amount)
-            
-            if ok1 and ok2:
-                op.params["previous_source_budget_minor"] = src_budget
-                op.params["previous_target_budget_minor"] = tgt_budget
-                return ExecResult(
-                    ok=True,
-                    detail={
-                        "message": f"Transferred {amount/100:.2f} INR from {src} to {tgt}",
-                        "source_campaign_id": src,
-                        "target_campaign_id": tgt,
-                        "amount_minor": amount
-                    }
-                )
-            else:
-                return ExecResult(ok=False, detail={"error": "Failed to update one or both campaign budgets"})
-
         elif op.action == "grow.bid.adjust":
             new_bid = op.params.get("new_bid_minor")
             ok = await client.update_campaign(campaign_id, bid_minor=new_bid)
@@ -1113,312 +885,6 @@ class GrowAdapter(Adapter):
                 )
             return ExecResult(ok=False, detail={"error": "Failed to complete keyword cleanup"})
             
-        elif op.action == "grow.audience.create":
-            name = op.params.get("audience_name")
-            lookalike_params = op.params.get("lookalike_params", {})
-            res = await client.create_audience(name, lookalike_params)
-            if res.get("success"):
-                return ExecResult(ok=True, detail={"message": f"Audience {name} created successfully", "audience_id": res.get("audience_id")})
-            return ExecResult(ok=False, detail={"error": "Failed to create audience"})
-
-        elif op.action == "grow.strategy.keyword_bid":
-            campaign_id = op.params.get("campaign_id")
-            strategy_type = op.params.get("strategy_type")
-            value = op.params.get("value")
-            ok = await client.update_keyword_bid_strategy(campaign_id, strategy_type, value)
-            if ok:
-                return ExecResult(ok=True, detail={"message": f"Keyword bid strategy updated on campaign {campaign_id}"})
-            return ExecResult(ok=False, detail={"error": f"Failed to update keyword bid strategy on campaign {campaign_id}"})
-
-        elif op.action == "grow.audit.creative":
-            campaign_id = op.params.get("campaign_id")
-            creatives = await client.audit_creatives(campaign_id)
-            underperforming = [c for c in creatives if c.get("status") == "UNDERPERFORMING"]
-            return ExecResult(
-                ok=True,
-                detail={
-                    "message": f"Creative audit completed for campaign {campaign_id}.",
-                    "total_creatives_audited": len(creatives),
-                    "underperforming_creatives": underperforming
-                }
-            )
-        elif op.action == "grow.campaign.performance_audit":
-            if not session:
-                return ExecResult(ok=False, detail={"error": "Database session is required for PPC performance audit"})
-                
-            system_instruction = self._load_profile("ppc_strategist")
-            if not system_instruction:
-                logger.warning("PPC strategist profile not found, skipping PPC performance audit.")
-                return ExecResult(ok=True, detail={"message": "PPC strategist profile missing. Skip audit."})
-
-            # 1. Fetch campaigns from local DB
-            stmt = select(Campaign).where(
-                Campaign.tenant_id == op.tenant_id,
-                Campaign.brand_id == op.brand_id,
-                Campaign.platform == provider
-            )
-            res_camps = await session.execute(stmt)
-            campaigns = res_camps.scalars().all()
-
-            if not campaigns:
-                logger.info(f"No registered campaigns found in local DB for platform {provider}")
-                return ExecResult(ok=True, detail={"message": f"No campaigns found for {provider}", "campaigns_checked": 0})
-
-            # 2. Fetch performance for each campaign
-            campaign_performances = []
-            for c in campaigns:
-                perf = await client.get_performance(c.id)
-                if perf:
-                    perf["campaign_name"] = c.name
-                    # Get actual campaign budget and bid
-                    ext_camp = await client.get_campaign(c.id)
-                    if ext_camp:
-                        perf["budget_minor"] = ext_camp.get("budget_minor", 0)
-                        perf["bid_minor"] = ext_camp.get("bid_minor", 0)
-                    campaign_performances.append(perf)
-
-            # 3. Analyze performance via LLM
-            import json
-            from app.services.llm import VertexAIClient
-
-            try:
-                project_id = os.getenv("AOS_GCP_PROJECT")
-                llm_client = VertexAIClient(project_id=project_id)
-                
-                analysis_report = llm_client.analyze_performance(
-                    json.dumps(campaign_performances), system_instruction
-                )
-                
-                # 4. Propose recommended actions as child Ops
-                from app.kernel import loop
-                
-                # A. Propose pauses
-                if analysis_report.get("propose_pauses"):
-                    for pause_rec in analysis_report["propose_pauses"]:
-                        pause_op = OpSpec(
-                            tenant_id=op.tenant_id,
-                            brand_id=op.brand_id,
-                            domain="grow",
-                            action="grow.campaign.pause",
-                            params={
-                                "campaign_id": pause_rec["campaign_id"],
-                                "reason": pause_rec["reason"],
-                                "provider": provider
-                            },
-                            severity=Severity(impact=2, reversibility=Reversibility.REVERSIBLE),
-                            cost_estimate=Money(amount_minor=0, currency="INR"),
-                            parent_op_id=op.id
-                        )
-                        proposed_row = await loop.propose(session, pause_op, actor="ppc_strategist")
-                        from app.kernel.services import resolve_brand_tier
-                        tier = await resolve_brand_tier(session, tenant_id=op.tenant_id, brand_id=op.brand_id, domain="grow")
-                        await loop.preview_and_gate(session, proposed_row, tier=tier, actor="ppc_strategist")
-                        logger.info(f"Proposed and previewed campaign pause for {pause_rec['campaign_id']} based on PPC performance audit.")
-
-                # B. Propose recommendations (bid adjustments / budget reallocations)
-                if analysis_report.get("recommendations"):
-                    for rec in analysis_report["recommendations"]:
-                        if rec["type"] == "bid_adjustment":
-                            bid_op = OpSpec(
-                                tenant_id=op.tenant_id,
-                                brand_id=op.brand_id,
-                                domain="grow",
-                                action="grow.bid.adjust",
-                                params={
-                                    "campaign_id": rec["campaign_id"],
-                                    "new_bid_minor": rec["recommended_bid_minor"],
-                                    "previous_bid_minor": rec["current_bid_minor"],
-                                    "reason": rec["reason"],
-                                    "provider": provider
-                                },
-                                severity=Severity(impact=1, reversibility=Reversibility.COMPENSATABLE),
-                                cost_estimate=Money(amount_minor=0, currency="INR"),
-                                parent_op_id=op.id
-                            )
-                            proposed_row = await loop.propose(session, bid_op, actor="ppc_strategist")
-                            from app.kernel.services import resolve_brand_tier
-                            tier = await resolve_brand_tier(session, tenant_id=op.tenant_id, brand_id=op.brand_id, domain="grow")
-                            await loop.preview_and_gate(session, proposed_row, tier=tier, actor="ppc_strategist")
-                            logger.info(f"Proposed and previewed bid adjustment for campaign {rec['campaign_id']} to {rec['recommended_bid_minor']} based on PPC audit.")
-
-                        elif rec["type"] == "budget_reallocation":
-                            reall_op = OpSpec(
-                                tenant_id=op.tenant_id,
-                                brand_id=op.brand_id,
-                                domain="grow",
-                                action="grow.budget.reallocate",
-                                params={
-                                    "source_campaign_id": rec["source_campaign_id"],
-                                    "target_campaign_id": rec["target_campaign_id"],
-                                    "transfer_amount_minor": rec["transfer_amount_minor"],
-                                    "reason": rec["reason"],
-                                    "provider": provider
-                                },
-                                severity=Severity(impact=2, reversibility=Reversibility.REVERSIBLE),
-                                cost_estimate=Money(amount_minor=0, currency="INR"),
-                                parent_op_id=op.id
-                            )
-                            proposed_row = await loop.propose(session, reall_op, actor="ppc_strategist")
-                            from app.kernel.services import resolve_brand_tier
-                            tier = await resolve_brand_tier(session, tenant_id=op.tenant_id, brand_id=op.brand_id, domain="grow")
-                            await loop.preview_and_gate(session, proposed_row, tier=tier, actor="ppc_strategist")
-                            logger.info(f"Proposed and previewed budget reallocation from {rec['source_campaign_id']} to {rec['target_campaign_id']} based on PPC audit.")
-
-                # 5. Update BrandProperty for ppc_audit findings
-                from app.models import BrandProperty
-                stmt_prop = select(BrandProperty).where(
-                    BrandProperty.tenant_id == op.tenant_id,
-                    BrandProperty.brand_id == op.brand_id,
-                    BrandProperty.type == "ppc_audit"
-                )
-                prop_res = await session.execute(stmt_prop)
-                prop = prop_res.scalar_one_or_none()
-                
-                if not prop:
-                    prop = BrandProperty(
-                        tenant_id=op.tenant_id,
-                        brand_id=op.brand_id,
-                        type="ppc_audit",
-                        provider=provider,
-                        status="healthy",
-                        findings={}
-                    )
-                    session.add(prop)
-                    
-                prop.findings = {
-                    "pauses": analysis_report.get("propose_pauses"),
-                    "recommendations": analysis_report.get("recommendations"),
-                    "last_checked_campaigns_count": len(campaign_performances)
-                }
-
-                return ExecResult(
-                    ok=True,
-                    detail={
-                        "message": "PPC performance audit completed",
-                        "campaigns_checked": len(campaign_performances),
-                        "recommendations_count": len(analysis_report.get("recommendations", [])) + len(analysis_report.get("propose_pauses", []))
-                    }
-                )
-            except Exception as e:
-                logger.error(f"Failed to perform PPC campaign performance audit: {e}")
-                return ExecResult(ok=False, detail={"error": f"PPC audit failed: {str(e)}"})
-
-        elif op.action == "grow.crm.pipeline_audit":
-            if not session:
-                return ExecResult(ok=False, detail={"error": "Database session is required for CRM pipeline audit"})
-                
-            system_instruction = self._load_profile("sales_pipeline_analyst")
-            if not system_instruction:
-                logger.warning("Sales pipeline analyst profile not found, skipping CRM audit.")
-                return ExecResult(ok=True, detail={"message": "Sales pipeline analyst profile missing. Skip audit."})
-
-            from app.models import Lead
-            stmt = select(Lead).where(
-                Lead.tenant_id == op.tenant_id,
-                Lead.brand_id == op.brand_id
-            )
-            res_leads = await session.execute(stmt)
-            leads = res_leads.scalars().all()
-
-            leads_data = []
-            for l in leads:
-                leads_data.append({
-                    "id": l.id,
-                    "lead_id": l.lead_id,
-                    "status": l.status,
-                    "deal_value_minor": l.deal_value_minor,
-                    "placed_at": l.placed_at.isoformat() if l.placed_at else None
-                })
-
-            if os.getenv("AOS_ENV") == "test":
-                if op.params.get("fail_sales"):
-                    report = {
-                        "passed": False,
-                        "bottlenecks": ["High drop-off between MQL and SQL stages", "Deal velocity has decreased by 20%"],
-                        "score_percent": 60,
-                        "propose_adjustments": [
-                            {
-                                "campaign_id": "camp-default",
-                                "adjustment_type": "increase_bid",
-                                "reason": "Optimize traffic quality to boost SQL transition rates"
-                            }
-                        ]
-                    }
-                else:
-                    report = {
-                        "passed": True,
-                        "bottlenecks": [],
-                        "score_percent": 95,
-                        "propose_adjustments": []
-                    }
-            else:
-                report = {
-                    "passed": True,
-                    "bottlenecks": [],
-                    "score_percent": 90,
-                    "propose_adjustments": []
-                }
-
-            from app.kernel import loop
-            if report.get("propose_adjustments"):
-                for adj in report["propose_adjustments"]:
-                    if adj["adjustment_type"] == "increase_bid":
-                        bid_op = OpSpec(
-                            tenant_id=op.tenant_id,
-                            brand_id=op.brand_id,
-                            domain="grow",
-                            action="grow.bid.adjust",
-                            params={
-                                "campaign_id": adj["campaign_id"],
-                                "new_bid_minor": 7_500,
-                                "previous_bid_minor": 5_000,
-                                "reason": adj["reason"],
-                                "provider": "google-ads"
-                            },
-                            severity=Severity(impact=1, reversibility=Reversibility.COMPENSATABLE),
-                            cost_estimate=Money(amount_minor=0, currency="INR"),
-                            parent_op_id=op.id
-                        )
-                        proposed_row = await loop.propose(session, bid_op, actor="sales_pipeline_analyst")
-                        from app.kernel.services import resolve_brand_tier
-                        tier = await resolve_brand_tier(session, tenant_id=op.tenant_id, brand_id=op.brand_id, domain="grow")
-                        await loop.preview_and_gate(session, proposed_row, tier=tier, actor="sales_pipeline_analyst")
-                        logger.info(f"Proposed bid adjustment based on CRM pipeline conversion bottleneck.")
-
-            from app.models import BrandProperty
-            now = datetime.datetime.now(datetime.timezone.utc)
-            stmt_prop = select(BrandProperty).where(
-                BrandProperty.tenant_id == op.tenant_id,
-                BrandProperty.brand_id == op.brand_id,
-                BrandProperty.type == "crm_pipeline_audit"
-            )
-            prop_res = await session.execute(stmt_prop)
-            prop = prop_res.scalar_one_or_none()
-            if not prop:
-                prop = BrandProperty(
-                    tenant_id=op.tenant_id,
-                    brand_id=op.brand_id,
-                    type="crm_pipeline_audit",
-                    provider="sales_pipeline_analyst",
-                    status="healthy" if report["passed"] else "bottlenecked",
-                    findings=report,
-                    last_checked=now
-                )
-                session.add(prop)
-            else:
-                prop.status = "healthy" if report["passed"] else "bottlenecked"
-                prop.findings = report
-                prop.last_checked = now
-
-            return ExecResult(
-                ok=report["passed"],
-                detail={
-                    "message": "CRM pipeline audit completed",
-                    "score_percent": report["score_percent"],
-                    "bottlenecks_found": len(report["bottlenecks"])
-                }
-            )
-
         elif op.action == "grow.meridian_mmm.audit":
             if not session:
                 return ExecResult(ok=False, detail={"error": "Database session is required for Meridian MMM Audit"})
@@ -1670,14 +1136,7 @@ class GrowAdapter(Adapter):
                 config = conn.config or {}
                 if conn.credential:
                     try:
-                        from app.models import Tenant
-                        stmt_tenant = select(Tenant).where(Tenant.id == conn.tenant_id)
-                        res_tenant = await session.execute(stmt_tenant)
-                        tenant = res_tenant.scalar_one_or_none()
-                        gcp_project = tenant.gcp_project if tenant else None
-
-                        secrets_client = SecretManagerClient(project_id=gcp_project)
-                        token = await secrets_client.read_secret(conn.credential)
+                        token = await SecretManagerClient().read_secret(conn.credential)
                     except Exception as e:
                         logger.warning(f"Failed to resolve {provider} token from Secret Manager: {e}")
         return token, config
@@ -1749,103 +1208,6 @@ class GrowAdapter(Adapter):
             result = await sf.register_poas_webhooks(gateway_url)
             return ExecResult(ok=bool(result.get("success")), detail=result)
 
-        if op.action == "grow.storefront.margin_pricing_audit":
-            if not session:
-                return ExecResult(ok=False, detail={"error": "Database session is required for Margin Pricing Audit"})
-                
-            system_instruction = self._load_profile("pricing_analyst")
-            if not system_instruction:
-                logger.warning("Pricing analyst profile not found, skipping pricing audit.")
-                return ExecResult(ok=True, detail={"message": "Pricing analyst profile missing. Skip audit."})
-
-            products = await sf.get_products_with_costs()
-            import json
-            import uuid
-            from app.kernel.optypes import Severity, Reversibility, Money
-
-            try:
-                from app.services.llm import VertexAIClient
-                project_id = os.getenv("AOS_GCP_PROJECT")
-                client = VertexAIClient(project_id=project_id)
-                
-                pricing_report = client.analyze_pricing(json.dumps(products), system_instruction)
-                
-                # Propose price adjustments
-                if pricing_report.get("propose_price_update") and pricing_report.get("recommendations"):
-                    from app.kernel import loop
-                    for rec in pricing_report["recommendations"]:
-                        price_op = OpSpec(
-                            tenant_id=op.tenant_id,
-                            brand_id=op.brand_id,
-                            domain="grow",
-                            action="grow.storefront.update_price",
-                            params={
-                                "sku": rec["sku"],
-                                "new_price": rec["recommended_price"],
-                                "current_price": rec["current_price"],
-                                "reason": rec["reason"],
-                                "provider": "shopify"
-                            },
-                            severity=Severity(impact=2, reversibility=Reversibility.COMPENSATABLE),
-                            cost_estimate=Money(amount_minor=0, currency="INR"),
-                            parent_op_id=op.id
-                        )
-                        proposed_row = await loop.propose(session, price_op, actor="pricing_analyst")
-                        from app.kernel.services import resolve_brand_tier
-                        tier = await resolve_brand_tier(session, tenant_id=op.tenant_id, brand_id=op.brand_id, domain="grow")
-                        await loop.preview_and_gate(session, proposed_row, tier=tier, actor="pricing_analyst")
-                        logger.info(f"Proposed and previewed price update for SKU {rec['sku']} to {rec['recommended_price']} based on margin optimization.")
-                        
-                # Update BrandProperty for pricing findings
-                from app.models import BrandProperty
-                stmt = select(BrandProperty).where(
-                    BrandProperty.tenant_id == op.tenant_id,
-                    BrandProperty.brand_id == op.brand_id,
-                    BrandProperty.type == "pricing_audit"
-                )
-                prop_res = await session.execute(stmt)
-                prop = prop_res.scalar_one_or_none()
-                
-                if not prop:
-                    prop = BrandProperty(
-                        tenant_id=op.tenant_id,
-                        brand_id=op.brand_id,
-                        type="pricing_audit",
-                        provider="shopify",
-                        status="healthy",
-                        findings={}
-                    )
-                    session.add(prop)
-                    
-                prop.findings = {
-                    "pricing_report": pricing_report.get("pricing_report"),
-                    "recommendations": pricing_report.get("recommendations"),
-                    "last_checked_products_count": len(products)
-                }
-                
-                return ExecResult(
-                    ok=True,
-                    detail={
-                        "message": "Storefront margin pricing audit completed",
-                        "products_checked": len(products),
-                        "recommendations_count": len(pricing_report.get("recommendations", []))
-                    }
-                )
-            except Exception as e:
-                logger.error(f"Failed to perform pricing analysis: {e}")
-                return ExecResult(ok=False, detail={"error": f"Pricing analysis failed: {str(e)}"})
-
-        if op.action == "grow.storefront.update_price":
-            sku = op.params.get("sku")
-            new_price = op.params.get("new_price")
-            if not sku or new_price is None:
-                return ExecResult(ok=False, detail={"error": "sku and new_price parameters are required"})
-            
-            ok = await sf.update_product_price(sku, new_price)
-            if ok:
-                return ExecResult(ok=True, detail={"message": f"Successfully updated SKU {sku} price to {new_price}"})
-            return ExecResult(ok=False, detail={"error": f"Failed to update SKU {sku} price"})
-
         return ExecResult(ok=False, detail={"error": f"Unknown storefront action: {op.action}"})
 
     async def verify(self, op: OpSpec, session: Optional[AsyncSession] = None) -> VerifyResult:
@@ -1869,13 +1231,7 @@ class GrowAdapter(Adapter):
                 return VerifyResult(ok=False, checks={"connection_in_db": False}, detail={"error": "Connection record not found"})
                 
             try:
-                from app.models import Tenant
-                stmt_tenant = select(Tenant).where(Tenant.id == conn.tenant_id)
-                res_tenant = await session.execute(stmt_tenant)
-                tenant = res_tenant.scalar_one_or_none()
-                gcp_project = tenant.gcp_project if tenant else None
-
-                secrets_client = SecretManagerClient(project_id=gcp_project)
+                secrets_client = SecretManagerClient()
                 token = await secrets_client.read_secret(conn.credential)
                 if not token:
                     raise ValueError("Retrieved token is empty")
@@ -1931,10 +1287,6 @@ class GrowAdapter(Adapter):
             if not conn:
                 return VerifyResult(ok=False, checks={"connection_active": False})
             return VerifyResult(ok=True, checks={"connection_active": True})
-        elif op.action == "grow.campaign.performance_audit":
-            return VerifyResult(ok=True, checks={"ppc_audit_completed": True})
-        elif op.action == "grow.crm.pipeline_audit":
-            return VerifyResult(ok=True, checks={"crm_audit_completed": True})
         elif op.action == "grow.meridian_mmm.audit":
             return VerifyResult(ok=True, checks={"report_generated": True})
         elif op.action == "grow.ai_readiness.audit":
@@ -1955,41 +1307,6 @@ class GrowAdapter(Adapter):
             return VerifyResult(ok=True, checks={"sales_analyzed": True})
         elif op.action == "grow.storefront.register_poas_webhooks":
             return VerifyResult(ok=True, checks={"webhook_registered": True})
-        elif op.action == "grow.storefront.margin_pricing_audit":
-            return VerifyResult(ok=True, checks={"pricing_audit_run": True})
-        elif op.action == "grow.storefront.update_price":
-            try:
-                # 1. Resolve storefront client
-                token, config = await self._resolve_provider_token(op, "shopify", session)
-                shop_url = op.params.get("shop_url") or config.get("shop_url") or "mock-shop"
-                from app.services.storefront import get_storefront_client
-                sf = get_storefront_client(provider="shopify", shop_url=shop_url, token=token)
-                
-                # 2. Get products and find SKU
-                products = await sf.get_products_with_costs()
-                expected_price = op.params.get("new_price")
-                sku = op.params.get("sku")
-                
-                sku_found = False
-                price_matched = False
-                for p in products:
-                    if p.get("sku") == sku:
-                        sku_found = True
-                        if p.get("current_price") == expected_price:
-                            price_matched = True
-                        break
-                        
-                if sku_found and price_matched:
-                    return VerifyResult(ok=True, checks={"price_updated": True}, detail={"sku": sku, "price": expected_price})
-                return VerifyResult(ok=False, checks={"price_updated": False, "sku_found": sku_found}, detail={"error": "Price mismatch in storefront"})
-            except Exception as e:
-                return VerifyResult(ok=False, checks={}, detail={"error": str(e)})
-        elif op.action == "grow.audience.create":
-            return VerifyResult(ok=True, checks={"audience_created": True})
-        elif op.action == "grow.strategy.keyword_bid":
-            return VerifyResult(ok=True, checks={"bid_strategy_applied": True})
-        elif op.action == "grow.audit.creative":
-            return VerifyResult(ok=True, checks={"creative_audited": True})
 
         campaign_id = op.params.get("campaign_id")
         # Resolve connection credentials dynamically
@@ -2007,13 +1324,7 @@ class GrowAdapter(Adapter):
             if conn:
                 config = conn.config or {}
                 try:
-                    from app.models import Tenant
-                    stmt_tenant = select(Tenant).where(Tenant.id == conn.tenant_id)
-                    res_tenant = await session.execute(stmt_tenant)
-                    tenant = res_tenant.scalar_one_or_none()
-                    gcp_project = tenant.gcp_project if tenant else None
-
-                    secrets_client = SecretManagerClient(project_id=gcp_project)
+                    secrets_client = SecretManagerClient()
                     token = await secrets_client.read_secret(conn.credential)
                 except Exception as e:
                     logger.warning(f"Failed to resolve marketing token from Secret Manager: {e}. Using raw credential.")
@@ -2036,37 +1347,6 @@ class GrowAdapter(Adapter):
                 if not camp:
                     return VerifyResult(ok=True, checks={"campaign_deleted": True})
                 return VerifyResult(ok=False, checks={"campaign_deleted": False})
-            except Exception as e:
-                 return VerifyResult(ok=False, checks={}, detail={"error": str(e)})
-
-        elif op.action == "grow.budget.reallocate":
-            try:
-                src = op.params.get("source_campaign_id")
-                tgt = op.params.get("target_campaign_id")
-                amount = op.params.get("transfer_amount_minor")
-                
-                prev_src_budget = op.params.get("previous_source_budget_minor")
-                prev_tgt_budget = op.params.get("previous_target_budget_minor")
-                
-                if prev_src_budget is None or prev_tgt_budget is None:
-                    src_camp = await client.get_campaign(src)
-                    tgt_camp = await client.get_campaign(tgt)
-                    if src_camp and tgt_camp:
-                        return VerifyResult(ok=True, checks={"campaigns_exist": True})
-                    return VerifyResult(ok=False, checks={"campaigns_exist": False})
-                    
-                src_camp = await client.get_campaign(src)
-                tgt_camp = await client.get_campaign(tgt)
-                
-                expected_src = prev_src_budget - amount
-                expected_tgt = prev_tgt_budget + amount
-                
-                ok_src = src_camp and src_camp.get("budget_minor") == expected_src
-                ok_tgt = tgt_camp and tgt_camp.get("budget_minor") == expected_tgt
-                
-                if ok_src and ok_tgt:
-                    return VerifyResult(ok=True, checks={"budget_reallocated": True}, detail={"source": src_camp, "target": tgt_camp})
-                return VerifyResult(ok=False, checks={"budget_reallocated": False}, detail={"source": src_camp, "target": tgt_camp})
             except Exception as e:
                  return VerifyResult(ok=False, checks={}, detail={"error": str(e)})
 
@@ -2197,26 +1477,6 @@ class GrowAdapter(Adapter):
                         parent_op_id=op.id
                     )
                 ]
-        elif op.action == "grow.budget.reallocate":
-            src = op.params.get("source_campaign_id")
-            tgt = op.params.get("target_campaign_id")
-            amount = op.params.get("transfer_amount_minor")
-            return [
-                OpSpec(
-                    tenant_id=op.tenant_id,
-                    brand_id=op.brand_id,
-                    domain=self.domain,
-                    action="grow.budget.reallocate",
-                    params={
-                        "source_campaign_id": tgt,
-                        "target_campaign_id": src,
-                        "transfer_amount_minor": amount,
-                        "provider": op.params.get("provider", "google-ads")
-                    },
-                    severity=Severity(impact=1, reversibility=Reversibility.REVERSIBLE),
-                    parent_op_id=op.id
-                )
-            ]
         elif op.action == "grow.bid.adjust":
             prev_bid = op.params.get("previous_bid_minor")
             if prev_bid is not None:
@@ -2285,7 +1545,5 @@ class GrowAdapter(Adapter):
                     parent_op_id=op.id
                 )
             ]
-        elif op.action in ("grow.audience.create", "grow.strategy.keyword_bid", "grow.audit.creative"):
-            return []
 
         return []

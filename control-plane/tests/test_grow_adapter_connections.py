@@ -2,7 +2,7 @@ import pytest
 from sqlalchemy import select
 from app.adapters.grow import GrowAdapter
 from app.kernel.optypes import OpSpec, Severity, Reversibility, Money
-from app.models import Connection
+from app.models import Connection, Tenant
 
 @pytest.fixture
 def adapter():
@@ -179,6 +179,53 @@ async def test_grow_meta_execute_disconnect(adapter, meta_connect_op, session):
     )
     db_res = await session.execute(stmt)
     assert db_res.scalar_one_or_none() is None
+
+
+@pytest.mark.asyncio
+async def test_grow_disconnect_uses_tenant_project_for_secret_delete(adapter, session, monkeypatch):
+    stub_state = {"delete_calls": 0}
+
+    class StubSecretManagerClient:
+        def __init__(self, project_id=None):
+            stub_state["project_id"] = project_id
+
+        async def delete_secret(self, secret_ref):
+            stub_state["delete_calls"] += 1
+            stub_state["deleted_secret_ref"] = secret_ref
+
+    monkeypatch.setattr("app.adapters.grow.SecretManagerClient", StubSecretManagerClient)
+
+    tenant = await session.get(Tenant, "tenant-webhook-test")
+    if tenant is None:
+        tenant = Tenant(id="tenant-webhook-test", name="Tenant Dedicated")
+        session.add(tenant)
+    tenant.hosting_tier = "dedicated"
+    tenant.gcp_project = "brand-dedicated-project"
+    await session.flush()
+
+    session.add(Connection(
+        tenant_id="tenant-webhook-test",
+        brand_id="brand-shopify-test",
+        provider="google-ads",
+        credential="projects/brand-dedicated-project/secrets/google-token/versions/latest",
+        config={}
+    ))
+    await session.commit()
+
+    disconnect_op = OpSpec(
+        tenant_id="tenant-webhook-test",
+        brand_id="brand-shopify-test",
+        domain="grow",
+        action="grow.google.disconnect",
+        params={"provider": "google-ads"},
+        severity=Severity(impact=1, reversibility=Reversibility.COMPENSATABLE),
+        cost_estimate=Money(0),
+    )
+    res = await adapter.execute(disconnect_op, "idem_gads_disconnect_dedicated", session=session)
+    assert res.ok is True
+    assert stub_state["project_id"] == "brand-dedicated-project"
+    assert stub_state["delete_calls"] == 1
+    assert stub_state["deleted_secret_ref"] == "projects/brand-dedicated-project/secrets/google-token/versions/latest"
 
 # Backward Compatibility Tests
 @pytest.mark.asyncio
